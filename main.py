@@ -320,6 +320,7 @@ def fetch_semantic_scholar(query: str = "ergonomics workplace",
 def call_gemini(prompt: str, data_json: str) -> str:
     if not GEMINI_API_KEY:
         return ""
+    time.sleep(5)  # Gemini 429 오류 방지
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}")
     payload = {
