@@ -348,49 +348,74 @@ def translate_ko(text: str) -> str:
 
 NEWS_PROMPT = """당신은 초음파 의료기기 산업 전문 애널리스트입니다. 아래 뉴스 데이터를 분석하여 HTML 뉴스레터 섹션을 만드세요.
 
-각 항목을 다음 카테고리로 분류하세요:
-- 🆕 신제품 및 기술 (New Products & Technology)
-- ✅ 규제 승인 (Regulatory Approvals — FDA, CE, MFDS 등)
-- 🤝 기업 인수·합병·파트너십
-- 📊 시장 및 산업 동향
+## 핵심 규칙
+1. **회사별로 그룹핑**하여 출력하세요. 각 회사마다 별도 섹션을 만드세요.
+2. 회사와 무관한 뉴스(주가 분석, TV/오디오 제품 등 의료기기 무관 기사)는 **완전히 제외**하세요.
+3. 각 기사마다 영어 요약 2문장 + 자연스러운 한국어 번역을 작성하세요.
+4. 한국어는 자연스러운 구어체 문장으로 작성하세요 (기계 번역 금지).
 
-각 항목마다 영어 요약 2~3문장 + 한국어 번역(합니다체).
+## 출력 형식
 
-HTML 형식:
-<div style="background:#f8f9fa;border-left:4px solid #2e86c1;padding:12px 16px;margin:10px 0;">
-  <h4 style="margin:0 0 4px;"><a href="URL" style="color:#1a5276;text-decoration:none;">제목</a></h4>
-  <p style="font-size:12px;color:#777;margin:2px 0;">📅 날짜 · 📰 출처</p>
-  <p style="font-size:14px;color:#333;">영어 요약</p>
-  <p style="font-size:14px;color:#444;background:#eef6fb;padding:8px;border-radius:4px;">🇰🇷 한국어 요약</p>
+회사 섹션 헤더:
+<div style="margin:20px 0 8px;padding:10px 16px;background:#1a5276;border-radius:6px;">
+  <h3 style="color:#fff;margin:0;font-size:16px;">🏢 회사명 (국가)</h3>
 </div>
 
-카테고리별로 묶어 출력. HTML만 출력.
+각 기사:
+<div style="background:#f8f9fa;border-left:4px solid #2e86c1;padding:12px 16px;margin:6px 0 6px 16px;">
+  <span style="font-size:11px;font-weight:bold;color:#2e86c1;">카테고리</span>
+  <h4 style="margin:4px 0;"><a href="URL" style="color:#1a5276;text-decoration:none;font-size:14px;">기사 제목</a></h4>
+  <p style="font-size:12px;color:#777;margin:2px 0;">📅 날짜 · 📰 출처</p>
+  <p style="font-size:13px;color:#333;line-height:1.6;">영어 요약 2문장</p>
+  <p style="font-size:13px;color:#444;background:#eef6fb;padding:8px;border-radius:4px;line-height:1.6;">🇰🇷 자연스러운 한국어 요약</p>
+</div>
+
+카테고리는 다음 중 하나로 표기:
+🆕 신제품·기술  ✅ 인허가 승인  🤝 인수·합병·파트너십  📊 시장·경영 동향  🔬 임상·연구
+
+## 중요
+- 의료기기와 무관한 기사(TV, 오디오, 가전, 주가 분석만 있는 기사 등)는 반드시 제외
+- 회사 섹션은 뉴스 건수가 많은 회사 순으로 정렬
+- 한 회사에 뉴스가 1건뿐이면 헤더 없이 기사만 출력해도 됨
+- HTML만 출력하고 다른 텍스트 포함 금지
 
 뉴스 데이터:
 {{DATA_JSON}}"""
 
-PAPERS_PROMPT = """당신은 인간공학 및 직업건강 전문 연구자입니다. 아래 논문 데이터로 HTML 뉴스레터 섹션을 만드세요.
+PAPERS_PROMPT = """당신은 인간공학 및 직업건강 분야 전문 연구자입니다. 아래 논문 데이터를 분석하여 한국어 독자를 위한 HTML 뉴스레터 섹션을 만드세요.
 
-각 논문마다:
-1. 주제: 🦴 근골격계질환 / 🏥 임상인간공학 / 🔧 작업환경 / 📐 생체역학 / 📊 역학 / 🧠 AI 활용 / 🩺 초음파 인간공학
-2. 영어 요약 3~4문장 (목적·방법·결과·의의)
-3. 제목 및 요약 한국어 번역(합니다체)
+## 번역 품질 기준 (매우 중요)
+- 한국어 번역은 반드시 **자연스러운 한국어 문장**으로 작성하세요
+- 기계 번역처럼 어색한 직역은 절대 금지입니다
+- 연구 분야 전문가가 쓴 것처럼 매끄럽게 작성하세요
+- 숫자, 통계, 고유명사(저자명, 기관명)는 영어 그대로 유지하세요
+- 문장 끝은 "~했습니다", "~나타났습니다", "~시사합니다" 등 자연스러운 합니다체 사용
 
-HTML 형식:
+## 각 논문 처리 방법
+1. 주제 분류: 🦴 근골격계질환 / 🏥 임상 인간공학 / 🔧 작업환경 개선 / 📐 생체역학 / 📊 역학·통계 / 🧠 AI·기술 / 🩺 초음파 인간공학 / 🔬 기타 의학연구
+2. 제목 번역: 자연스러운 한국어 제목으로 의역 가능
+3. 요약 작성: 영어로 연구 목적·방법·주요 결과·의의를 3~4문장으로 작성
+4. 한국어 요약: 위 영어 요약을 자연스러운 한국어로 번역 (직역 금지)
+
+## 출력 형식
 <div style="background:#f8f9fa;border-left:4px solid #27ae60;padding:14px 16px;margin:12px 0;">
-  <p style="font-size:11px;color:#27ae60;font-weight:bold;margin:0;">주제</p>
-  <h4 style="margin:4px 0;font-size:15px;color:#1a5276;">📎 영어 제목</h4>
-  <p style="font-size:14px;color:#2c3e50;margin:2px 0;">🇰🇷 한국어 제목</p>
-  <p style="font-size:12px;color:#777;margin:4px 0;">👤 저자<br/>🏛️ 소속<br/>📖 저널 · 📅 날짜</p>
-  <p style="font-size:14px;color:#333;line-height:1.5;"><strong>Summary:</strong> 영어 요약</p>
-  <p style="font-size:14px;color:#444;background:#eaf7ee;padding:8px;border-radius:4px;">🇰🇷 <strong>요약:</strong> 한국어 요약</p>
+  <p style="font-size:11px;color:#27ae60;font-weight:bold;margin:0 0 4px;">주제분류</p>
+  <h4 style="margin:0 0 4px;font-size:15px;color:#1a5276;">📎 영어 제목</h4>
+  <p style="font-size:14px;color:#2c3e50;margin:2px 0 8px;">🇰🇷 자연스러운 한국어 제목</p>
+  <p style="font-size:12px;color:#777;margin:4px 0 8px;line-height:1.8;">
+    👤 저자명<br/>
+    🏛️ 소속기관<br/>
+    📖 저널명 · 📅 출판일
+    [DOI 링크 있으면: · <a href="https://doi.org/DOI번호" style="color:#2e86c1;">원문 보기</a>]
+  </p>
+  <p style="font-size:13px;color:#333;line-height:1.7;margin:0 0 6px;"><strong>Summary:</strong> 영어 요약 3~4문장</p>
+  <p style="font-size:13px;color:#444;background:#eaf7ee;padding:10px;border-radius:4px;line-height:1.8;">🇰🇷 <strong>요약:</strong> 자연스러운 한국어 요약</p>
 </div>
 
-HTML만 출력.
+HTML만 출력하고 다른 텍스트는 절대 포함하지 마세요.
 
 논문 데이터:
 {{DATA_JSON}}"""
-
 
 def build_news_html(items: list[dict]) -> str:
     if not items:
