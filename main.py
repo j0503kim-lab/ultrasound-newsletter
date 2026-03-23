@@ -320,20 +320,32 @@ def fetch_semantic_scholar(query: str = "ergonomics workplace",
 def call_gemini(prompt: str, data_json: str) -> str:
     if not GEMINI_API_KEY:
         return ""
-    time.sleep(5)  # Gemini 429 오류 방지
+    time.sleep(8)  # 429 오류 방지 대기
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}")
     payload = {
         "contents": [{"parts": [{"text": prompt.replace("{{DATA_JSON}}", data_json)}]}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8000},
     }
-    r = requests.post(url, json=payload, timeout=120)
-    if r.status_code == 200:
-        candidates = r.json().get("candidates", [])
-        if candidates:
-            return (candidates[0]["content"]["parts"][0]["text"]
-                    .replace("```html","").replace("```","").strip())
-    print(f"  Gemini 오류: {r.status_code}")
+    for attempt in range(3):  # 최대 3번 재시도
+        try:
+            r = requests.post(url, json=payload, timeout=120)
+            if r.status_code == 200:
+                candidates = r.json().get("candidates", [])
+                if candidates:
+                    return (candidates[0]["content"]["parts"][0]["text"]
+                            .replace("```html","").replace("```","").strip())
+            elif r.status_code == 429:
+                wait = (attempt + 1) * 15  # 15초, 30초, 45초 간격으로 재시도
+                print(f"  Gemini 429 — {wait}초 후 재시도...")
+                time.sleep(wait)
+            else:
+                print(f"  Gemini 오류: {r.status_code}")
+                return ""
+        except Exception as e:
+            print(f"  Gemini 예외: {e}")
+            return ""
+    print("  Gemini 재시도 모두 실패 → 기본 포맷 사용")
     return ""
 
 
@@ -420,49 +432,203 @@ HTML만 출력하고 다른 텍스트는 절대 포함하지 마세요.
 def build_news_html(items: list[dict]) -> str:
     if not items:
         return "<p>오늘 관련 뉴스가 없습니다.</p>"
-    result = call_gemini(NEWS_PROMPT, json.dumps(items, ensure_ascii=False))
-    if result:
-        return result
-    # Gemini 실패 시 기본 포맷
+
+    # 뉴스를 30개씩 나눠서 Gemini 호출 (429 방지)
+    chunk_size = 30
+    all_html = ""
+
+    if GEMINI_API_KEY:
+        for i in range(0, min(len(items), 90), chunk_size):
+            chunk = items[i:i + chunk_size]
+            result = call_gemini(NEWS_PROMPT, json.dumps(chunk, ensure_ascii=False))
+            if result:
+                all_html += result
+        if all_html:
+            return all_html
+
+    # Gemini 실패 시 → 회사별 그룹핑 기본 포맷
+    return build_news_html_fallback(items)
+
+
+def build_news_html_fallback(items: list[dict]) -> str:
+    """Gemini 없이 회사별로 그룹핑해서 표시하는 기본 포맷"""
+
+    # 회사명 추출 규칙
+    COMPANY_KEYWORDS = {
+        "GE HealthCare": ["ge healthcare", "gehc", "intelerad"],
+        "Philips": ["philips"],
+        "Siemens Healthineers": ["siemens healthineers", "siemens"],
+        "Samsung Medison": ["samsung medison", "samsung hme"],
+        "Canon Medical": ["canon medical"],
+        "FUJIFILM / Sonosite": ["fujifilm", "sonosite"],
+        "Mindray": ["mindray"],
+        "Esaote": ["esaote"],
+        "Butterfly Network": ["butterfly network", "bfly"],
+        "Exo Imaging": ["exo imaging", "exo iris"],
+        "Clarius": ["clarius"],
+        "EchoNous": ["echonous", "kosmos"],
+        "Alpinion": ["alpinion"],
+        "Healcerion": ["healcerion", "sonon"],
+        "SonoScape": ["sonoscape"],
+        "Mindray / China": ["chison", "wisonic", "edan instruments", "vinno"],
+        "AI 초음파": ["ultromics", "caption health", "ultrasight",
+                     "dia imaging", "icardio", "brightheart", "sonio",
+                     "thinksono", "smartalpha", "nerveblox"],
+        "FDA 인허가": ["fda", "510k", "ce mark", "de novo"],
+    }
+
+    def get_company(item):
+        text = (item["title"] + " " + item.get("snippet","") +
+                " " + item.get("source","")).lower()
+        for company, keywords in COMPANY_KEYWORDS.items():
+            if any(kw in text for kw in keywords):
+                return company
+        return "기타"
+
+    # 회사별로 분류
+    grouped = {}
+    for item in items:
+        company = get_company(item)
+        if company not in grouped:
+            grouped[company] = []
+        grouped[company].append(item)
+
+    # 건수 많은 순으로 정렬, 기타는 맨 뒤
+    sorted_companies = sorted(
+        [(k, v) for k, v in grouped.items() if k != "기타"],
+        key=lambda x: len(x[1]), reverse=True
+    )
+    if "기타" in grouped:
+        sorted_companies.append(("기타", grouped["기타"]))
+
     html = ""
-    for item in items[:20]:
-        kr = translate_ko(item["title"])
+    for company, company_items in sorted_companies:
+        # 회사 헤더
         html += (
-            f'<div style="background:#f8f9fa;border-left:4px solid #2e86c1;'
-            f'padding:12px 16px;margin:10px 0;">'
-            f'<h4 style="margin:0 0 4px;"><a href="{item["url"]}" '
-            f'style="color:#1a5276;text-decoration:none;">{item["title"]}</a></h4>'
-            f'<p style="font-size:12px;color:#777;">📅 {item["date"]} · '
-            f'📰 {item["source"]} · 🏷️ {item.get("category","")}</p>'
-            f'<p style="font-size:13px;color:#555;">{item["snippet"][:200]}</p>'
-            f'<p style="font-size:13px;color:#444;background:#eef6fb;'
-            f'padding:8px;border-radius:4px;">🇰🇷 {kr}</p></div>'
+            f'<div style="margin:20px 0 8px;padding:10px 16px;'
+            f'background:#1a5276;border-radius:6px;">'
+            f'<h3 style="color:#fff;margin:0;font-size:16px;">'
+            f'🏢 {company} ({len(company_items)}건)</h3></div>'
         )
+        for item in company_items[:8]:  # 회사당 최대 8건
+            # 제목에서 " - 출처명" 제거해서 깔끔하게
+            title = item["title"]
+            if " - " in title:
+                title = title.rsplit(" - ", 1)[0]
+
+            # 한국어 번역
+            kr = translate_ko(title)
+
+            html += (
+                f'<div style="background:#f8f9fa;border-left:4px solid #2e86c1;'
+                f'padding:12px 16px;margin:4px 0 4px 16px;">'
+                f'<h4 style="margin:0 0 4px;font-size:14px;">'
+                f'<a href="{item["url"]}" style="color:#1a5276;'
+                f'text-decoration:none;">{title}</a></h4>'
+                f'<p style="font-size:11px;color:#777;margin:2px 0;">'
+                f'📅 {item["date"][:16]} · 📰 {item["source"]}</p>'
+                f'<p style="font-size:13px;color:#444;background:#eef6fb;'
+                f'padding:6px 8px;border-radius:4px;margin:4px 0 0;">'
+                f'🇰🇷 {kr}</p></div>'
+            )
     return html
 
 
 def build_papers_html(papers: list[dict]) -> str:
     if not papers:
         return "<p>오늘 새 논문이 없습니다.</p>"
-    result = call_gemini(PAPERS_PROMPT, json.dumps(papers, ensure_ascii=False))
-    if result:
-        return result
+
+    if GEMINI_API_KEY:
+        result = call_gemini(PAPERS_PROMPT, json.dumps(papers, ensure_ascii=False))
+        if result:
+            return result
+
+    # Gemini 실패 시 → 개선된 기본 포맷
+    return build_papers_html_fallback(papers)
+
+
+def build_papers_html_fallback(papers: list[dict]) -> str:
+    """Gemini 없이 논문을 표시하는 기본 포맷 (번역 품질 개선)"""
+
+    TOPIC_KEYWORDS = {
+        "🩺 초음파 인간공학": ["ultrasound", "sonographer", "transducer", "scanning"],
+        "🦴 근골격계질환": ["musculoskeletal", "msd", "carpal tunnel", "shoulder",
+                          "wrist", "tendon", "repetitive", "strain"],
+        "🏥 임상 인간공학": ["surgeon", "physician", "nurse", "clinician",
+                           "radiation", "echocardiographer", "percutaneous"],
+        "🔧 작업환경 개선": ["workstation", "workplace", "posture", "pointing device",
+                           "mouse", "keyboard", "sitting", "standing"],
+        "📐 생체역학":     ["biomechanics", "muscle activity", "emg", "force",
+                           "kinematics", "motion"],
+        "📊 역학·통계":    ["epidemiology", "prevalence", "survey", "cohort",
+                           "cross-sectional", "retrospective"],
+        "🧠 AI·기술":     ["machine learning", "deep learning", "ai", "algorithm",
+                          "computer vision"],
+    }
+
+    def get_topic(paper):
+        text = (paper["title"] + " " + paper["abstract"]).lower()
+        for topic, keywords in TOPIC_KEYWORDS.items():
+            if any(kw in text for kw in keywords):
+                return topic
+        return "🔬 기타 의학연구"
+
+    # 논문 제목 자연스럽게 번역하는 프롬프트
+    def translate_title_naturally(title: str) -> str:
+        """단순 번역보다 자연스럽게 의역"""
+        try:
+            translated = GoogleTranslator(source="auto", target="ko").translate(title)
+            # 어색한 패턴 후처리
+            translated = (translated
+                .replace("의 효과", "가 미치는 영향")
+                .replace("에 대한 연구", " 연구")
+                .replace("를 위한 방법", " 방법론")
+                .replace("수행", "실시")
+            )
+            return translated
+        except Exception:
+            return title
+
+    def translate_abstract_naturally(abstract: str) -> str:
+        """abstract 자연스러운 번역"""
+        if not abstract:
+            return ""
+        try:
+            # 300자씩 나눠서 번역 (정확도 향상)
+            sentences = abstract[:400]
+            translated = GoogleTranslator(source="auto", target="ko").translate(sentences)
+            return translated
+        except Exception:
+            return ""
+
     html = ""
     for p in papers[:10]:
-        kr_title = translate_ko(p["title"])
-        kr_abs   = translate_ko(p["abstract"][:300]) if p["abstract"] else ""
-        doi_link = f'<a href="https://doi.org/{p["doi"]}">DOI</a>' if p["doi"] else ""
+        topic = get_topic(p)
+        kr_title = translate_title_naturally(p["title"])
+        kr_abs = translate_abstract_naturally(p["abstract"]) if p["abstract"] else ""
+        doi_link = (f' · <a href="https://doi.org/{p["doi"]}" '
+                    f'style="color:#2e86c1;">원문 보기</a>'
+                    if p["doi"] else "")
+
         html += (
             f'<div style="background:#f8f9fa;border-left:4px solid #27ae60;'
-            f'padding:12px 16px;margin:10px 0;">'
-            f'<h4 style="margin:0 0 4px;color:#1a5276;">{p["title"]}</h4>'
-            f'<p style="font-size:13px;color:#2c3e50;">🇰🇷 {kr_title}</p>'
-            f'<p style="font-size:12px;color:#777;">👤 {p["authors"]}<br/>'
-            f'🏛️ {p["affiliations"][:150]}<br/>📖 {p["journal"]} · '
-            f'📅 {p["pub_date"]} {doi_link}</p>'
-            f'<p style="font-size:13px;color:#333;">{p["abstract"][:300]}</p>'
+            f'padding:14px 16px;margin:12px 0;">'
+            f'<p style="font-size:11px;color:#27ae60;font-weight:bold;margin:0 0 4px;">'
+            f'{topic}</p>'
+            f'<h4 style="margin:0 0 4px;font-size:15px;color:#1a5276;">'
+            f'📎 {p["title"]}</h4>'
+            f'<p style="font-size:14px;color:#2c3e50;margin:2px 0 8px;">'
+            f'🇰🇷 {kr_title}</p>'
+            f'<p style="font-size:12px;color:#777;margin:4px 0 8px;line-height:1.8;">'
+            f'👤 {p["authors"]}<br/>'
+            f'🏛️ {p["affiliations"][:150] if p["affiliations"] else "소속 정보 없음"}<br/>'
+            f'📖 {p["journal"]} · 📅 {p["pub_date"]}{doi_link}</p>'
+            f'<p style="font-size:13px;color:#333;line-height:1.7;margin:0 0 6px;">'
+            f'<strong>Abstract:</strong> {p["abstract"][:350]}...</p>'
             f'<p style="font-size:13px;color:#444;background:#eaf7ee;'
-            f'padding:8px;border-radius:4px;">🇰🇷 {kr_abs}</p></div>'
+            f'padding:10px;border-radius:4px;line-height:1.8;">'
+            f'🇰🇷 <strong>요약:</strong> {kr_abs}</p>'
+            f'</div>'
         )
     return html
 
