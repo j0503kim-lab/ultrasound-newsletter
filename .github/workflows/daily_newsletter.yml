@@ -2,7 +2,7 @@ name: 매일 초음파 & 인간공학 뉴스레터
 
 on:
   schedule:
-    - cron: '0 22 * * *'
+    - cron: '0 22 * * *'   # 한국시간 오전 7시 = UTC 전날 22시
   workflow_dispatch:
 
 jobs:
@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: 코드 가져오기
+      - name: 저장소 코드 가져오기
         uses: actions/checkout@v4
 
       - name: Python 설치
@@ -20,13 +20,15 @@ jobs:
           python-version: '3.11'
 
       - name: 패키지 설치
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests feedparser deep-translator
 
       - name: 뉴스레터 실행
         env:
-          GMAIL_ADDRESS:      ${{ secrets.GMAIL_ADDRESS }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          RECIPIENT_EMAIL:    ${{ secrets.RECIPIENT_EMAIL }}
-          GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
-          PUBMED_API_KEY:     ${{ secrets.PUBMED_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PUBMED_API_KEY: ${{ secrets.PUBMED_API_KEY }}
         run: python main.py
