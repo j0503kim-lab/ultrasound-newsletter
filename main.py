@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 초음파 산업 & 인간공학 연구 뉴스레터
-- 전 세계 초음파 회사 동향 모니터링
+- 실행 시간 최적화 버전
 - 회사별 그룹핑 강화
-- 인간공학 논문 자연스러운 한국어 요약 강화
+- 자연스러운 한국어 요약
 """
 
 import os
 import json
-import time
 import html
+import time
 import datetime
 import requests
 import feedparser
@@ -27,6 +27,11 @@ GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 PUBMED_API_KEY = os.environ.get("PUBMED_API_KEY", "")
 
+REQUEST_TIMEOUT = 25
+MAX_NEWS_FOR_GEMINI = 18
+MAX_PAPERS_FOR_GEMINI = 6
+MAX_NEWS_PER_COMPANY = 5
+
 # ── 노이즈 필터 ────────────────────────────────────────────────
 NOISE_KEYWORDS = [
     "cleaning", "welding", "industrial ndt", "non-destructive",
@@ -39,6 +44,14 @@ NOISE_KEYWORDS = [
 def is_medical_news(title: str, snippet: str = "") -> bool:
     text = (title + " " + snippet).lower()
     return not any(noise in text for noise in NOISE_KEYWORDS)
+
+def safe_html(text: str) -> str:
+    return html.escape(text or "")
+
+def trim_title_suffix(title: str) -> str:
+    if " - " in title:
+        return title.rsplit(" - ", 1)[0].strip()
+    return title.strip()
 
 # ── RSS 쿼리 ───────────────────────────────────────────────────
 RSS_QUERIES = {
@@ -94,7 +107,7 @@ SPECIALIST_RSS_FEEDS = [
 
 # ── 회사 분류 맵 ───────────────────────────────────────────────
 COMPANY_MAP = {
-    "GE HealthCare": ["ge healthcare", "gehc", "bk medical", "caption health"],
+    "GE HealthCare": ["ge healthcare", "gehc", "intelerad", "bk medical", "caption health"],
     "Philips": ["philips"],
     "Siemens Healthineers": ["siemens healthineers"],
     "Samsung Medison": ["samsung medison", "samsung hme"],
@@ -124,11 +137,10 @@ COMPANY_MAP = {
     "SuperSonic Imagine": ["supersonic imagine", "hologic supersonic"],
     "TechsoMed": ["techsomed"],
     "AI 초음파 솔루션": [
-        "ultromics", "ultrasight", "dia imaging", "icardio",
-        "brightheart", "thinksono", "smartalpha", "nerveblox",
-        "ligence", "diagnoly", "sonio"
+        "ultromics", "ultrasight", "dia imaging", "icardio", "brightheart",
+        "thinksono", "smartalpha", "nerveblox", "ligence", "diagnoly", "sonio"
     ],
-    "FDA 인허가": ["510(k)", "fda clearance", "fda approval", "de novo", "ce mark", "mfds"],
+    "FDA 인허가": ["fda 510", "510(k)", "ce mark", "de novo", "fda approval", "fda clearance"],
 }
 
 def get_company(item: dict) -> str:
@@ -137,15 +149,6 @@ def get_company(item: dict) -> str:
         if any(kw in text for kw in keywords):
             return company
     return "기타 초음파 동향"
-
-# ── 공통 유틸 ─────────────────────────────────────────────────
-def safe_html(text: str) -> str:
-    return html.escape(text or "")
-
-def trim_title_suffix(title: str) -> str:
-    if " - " in title:
-        return title.rsplit(" - ", 1)[0].strip()
-    return title.strip()
 
 def classify_news_category(item: dict) -> str:
     text = (item.get("title", "") + " " + item.get("snippet", "")).lower()
@@ -160,7 +163,7 @@ def classify_news_category(item: dict) -> str:
     return "시장/경영"
 
 # ── 1. 데이터 수집 ─────────────────────────────────────────────
-def fetch_google_news_rss(query: str, label: str, max_items: int = 15) -> list:
+def fetch_google_news_rss(query: str, label: str, max_items: int = 10) -> list:
     url = (
         f"https://news.google.com/rss/search?"
         f"q={requests.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
@@ -170,7 +173,7 @@ def fetch_google_news_rss(query: str, label: str, max_items: int = 15) -> list:
 
     for e in feed.entries[:max_items]:
         title = e.get("title", "")
-        snippet = e.get("summary", "")[:500]
+        snippet = e.get("summary", "")[:280]
         if not is_medical_news(title, snippet):
             continue
 
@@ -190,18 +193,17 @@ def fetch_all_ultrasound_news() -> list:
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
 
     for label, query in RSS_QUERIES.items():
-        items = fetch_google_news_rss(query, label, 15)
+        items = fetch_google_news_rss(query, label, 10)
         for item in items:
             key = (trim_title_suffix(item["title"]).lower(), item.get("url", ""))
             if key not in seen:
                 seen.add(key)
                 all_items.append(item)
-        time.sleep(1)
 
     for name, url in SPECIALIST_RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
-            for e in feed.entries[:20]:
+            for e in feed.entries[:12]:
                 pub = e.get("published_parsed")
                 if pub:
                     pub_dt = datetime.datetime(*pub[:6], tzinfo=datetime.timezone.utc)
@@ -209,7 +211,7 @@ def fetch_all_ultrasound_news() -> list:
                         continue
 
                 title = e.get("title", "")
-                snippet = e.get("summary", "")[:500]
+                snippet = e.get("summary", "")[:280]
 
                 if "ultrasound" not in (title + snippet).lower():
                     continue
@@ -239,11 +241,11 @@ def fetch_fda_510k() -> list:
     url = (
         f"https://api.fda.gov/device/510k.json?"
         f"search=openfda.device_name:ultrasound"
-        f"+AND+decision_date:[{week_ago:%Y%m%d}+TO+{today:%Y%m%d}]&limit=10"
+        f"+AND+decision_date:[{week_ago:%Y%m%d}+TO+{today:%Y%m%d}]&limit=8"
     )
 
     try:
-        r = requests.get(url, timeout=30)
+        r = requests.get(url, timeout=REQUEST_TIMEOUT)
         if r.status_code == 200:
             items = []
             for rec in r.json().get("results", []):
@@ -261,7 +263,7 @@ def fetch_fda_510k() -> list:
         print(f"FDA 오류: {e}")
     return []
 
-def fetch_pubmed_papers(query="ergonomics", max_results=15) -> list:
+def fetch_pubmed_papers(query="ergonomics", max_results=10) -> list:
     params = {
         "db": "pubmed",
         "term": query,
@@ -277,14 +279,14 @@ def fetch_pubmed_papers(query="ergonomics", max_results=15) -> list:
     r = requests.get(
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
         params=params,
-        timeout=30
+        timeout=REQUEST_TIMEOUT
     )
     ids = r.json().get("esearchresult", {}).get("idlist", [])
     if not ids:
         print("PubMed 논문 없음")
         return []
 
-    time.sleep(0.5)
+    time.sleep(0.34)
 
     params2 = {
         "db": "pubmed",
@@ -298,7 +300,7 @@ def fetch_pubmed_papers(query="ergonomics", max_results=15) -> list:
     r2 = requests.get(
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
         params=params2,
-        timeout=30
+        timeout=REQUEST_TIMEOUT
     )
 
     root = ET.fromstring(r2.content)
@@ -311,14 +313,14 @@ def fetch_pubmed_papers(query="ergonomics", max_results=15) -> list:
             continue
 
         title = art.findtext(".//ArticleTitle", "")
-        abstract = " ".join([a.text or "" for a in art.findall(".//AbstractText")])[:2000]
+        abstract = " ".join([a.text or "" for a in art.findall(".//AbstractText")])[:900]
         authors = [
             f"{a.findtext('ForeName', '')} {a.findtext('LastName', '')}".strip()
             for a in art.findall(".//Author")[:6]
             if a.findtext("LastName")
         ]
         affil_el = art.find(".//AffiliationInfo/Affiliation")
-        affil = affil_el.text[:300] if affil_el is not None and affil_el.text else ""
+        affil = affil_el.text[:220] if affil_el is not None and affil_el.text else ""
         journal = art.findtext(".//Journal/Title", "")
         pmid = medline.findtext(".//PMID", "")
         doi_el = art.find(".//ELocationID[@EIdType='doi']")
@@ -344,7 +346,7 @@ def fetch_pubmed_papers(query="ergonomics", max_results=15) -> list:
     print(f"PubMed 논문 {len(papers)}편")
     return papers
 
-def fetch_arxiv_papers(query="ergonomics", max_results=8) -> list:
+def fetch_arxiv_papers(query="ergonomics", max_results=5) -> list:
     r = requests.get(
         "http://export.arxiv.org/api/query",
         params={
@@ -354,7 +356,7 @@ def fetch_arxiv_papers(query="ergonomics", max_results=8) -> list:
             "sortBy": "submittedDate",
             "sortOrder": "descending"
         },
-        timeout=30
+        timeout=REQUEST_TIMEOUT
     )
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     root = ET.fromstring(r.content)
@@ -374,7 +376,7 @@ def fetch_arxiv_papers(query="ergonomics", max_results=8) -> list:
             "title": entry.findtext("atom:title", "", ns).strip().replace("\n", " "),
             "authors": ", ".join(authors[:6]),
             "affiliations": "",
-            "abstract": entry.findtext("atom:summary", "", ns).strip()[:2000],
+            "abstract": entry.findtext("atom:summary", "", ns).strip()[:900],
             "doi": "",
             "journal": "arXiv preprint",
             "pub_date": pub[:10],
@@ -384,7 +386,7 @@ def fetch_arxiv_papers(query="ergonomics", max_results=8) -> list:
     print(f"arXiv 논문 {len(papers)}편")
     return papers
 
-def fetch_semantic_scholar(query="ergonomics workplace", max_results=10) -> list:
+def fetch_semantic_scholar(query="ergonomics workplace", max_results=5) -> list:
     today = datetime.date.today()
     yesterday = today - datetime.timedelta(days=3)
 
@@ -397,7 +399,7 @@ def fetch_semantic_scholar(query="ergonomics workplace", max_results=10) -> list
                 "limit": max_results,
                 "publicationDateOrYear": f"{yesterday}:{today}"
             },
-            timeout=30
+            timeout=REQUEST_TIMEOUT
         )
         if r.status_code != 200:
             return []
@@ -409,7 +411,7 @@ def fetch_semantic_scholar(query="ergonomics workplace", max_results=10) -> list
                 "title": p.get("title", ""),
                 "authors": ", ".join([a.get("name", "") for a in (p.get("authors") or [])[:6]]),
                 "affiliations": "",
-                "abstract": (p.get("abstract") or "")[:2000],
+                "abstract": (p.get("abstract") or "")[:900],
                 "doi": doi,
                 "journal": (p.get("journal") or {}).get("name", ""),
                 "pub_date": p.get("publicationDate", ""),
@@ -437,22 +439,22 @@ def call_gemini(prompt: str, data_json: str = "") -> str:
     payload = {
         "contents": [{"parts": [{"text": final_prompt}]}],
         "generationConfig": {
-            "temperature": 0.25,
-            "maxOutputTokens": 8000
+            "temperature": 0.2,
+            "maxOutputTokens": 7000
         }
     }
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            r = requests.post(url, json=payload, timeout=120)
+            r = requests.post(url, json=payload, timeout=90)
             if r.status_code == 200:
                 candidates = r.json().get("candidates", [])
                 if candidates:
                     text = candidates[0]["content"]["parts"][0]["text"]
-                    return text.replace("```html", "").replace("```", "").strip()
+                    return text.replace("```html", "").replace("```json", "").replace("```", "").strip()
             elif r.status_code == 429:
-                wait = (attempt + 1) * 20
-                print(f"Gemini 429 — {wait}초 대기...")
+                wait = 8 * (attempt + 1)
+                print(f"Gemini 429 — {wait}초 대기 후 재시도")
                 time.sleep(wait)
             else:
                 print(f"Gemini 오류: {r.status_code}")
@@ -463,22 +465,15 @@ def call_gemini(prompt: str, data_json: str = "") -> str:
 
     return ""
 
-def google_translate_ko(text: str) -> str:
+def translate_ko(text: str) -> str:
     if not text:
         return ""
     try:
-        return GoogleTranslator(source="auto", target="ko").translate(text[:4500])
+        return GoogleTranslator(source="auto", target="ko").translate(text[:3500])
     except Exception:
         return text
 
 def natural_korean_summary(title: str, abstract: str, authors: str = "", journal: str = "") -> dict:
-    """
-    Gemini 사용 가능 시:
-      - 자연스러운 한국어 제목
-      - 자연스러운 한국어 요약
-    Gemini 없으면:
-      - GoogleTranslator fallback
-    """
     if GEMINI_API_KEY:
         prompt = f"""
 당신은 인간공학 분야 학술 편집자입니다.
@@ -488,7 +483,7 @@ def natural_korean_summary(title: str, abstract: str, authors: str = "", journal
 - 직역투 금지
 - 한국 연구자가 읽는 학술 요약문처럼 작성
 - 제목은 짧고 자연스럽게
-- 요약은 3~4문장
+- 요약은 3문장 이내
 - 문장 종결은 "~했습니다 / ~나타났습니다 / ~시사합니다" 중심
 - 저자명, 기관명, 저널명, DOI는 번역하지 않음
 - 과장 금지, 초록에 없는 내용 추가 금지
@@ -503,28 +498,25 @@ JSON 형식:
 제목: {title}
 저자: {authors}
 저널: {journal}
-초록: {abstract}
+초록: {abstract[:1500]}
 """
         result = call_gemini(prompt, "")
         if result:
             try:
                 parsed = json.loads(result)
                 return {
-                    "ko_title": parsed.get("ko_title", "").strip() or google_translate_ko(title),
-                    "ko_summary": parsed.get("ko_summary", "").strip() or google_translate_ko(abstract[:1200]),
+                    "ko_title": parsed.get("ko_title", "").strip() or translate_ko(title),
+                    "ko_summary": parsed.get("ko_summary", "").strip() or translate_ko(abstract[:500]),
                 }
             except Exception:
                 pass
 
     return {
-        "ko_title": google_translate_ko(title),
-        "ko_summary": google_translate_ko(abstract[:1200]),
+        "ko_title": translate_ko(title),
+        "ko_summary": translate_ko(abstract[:500]),
     }
 
 def news_summary_bilingual(item: dict) -> dict:
-    """
-    뉴스용 영어 2문장 + 자연스러운 한국어 2문장 요약
-    """
     title = item.get("title", "")
     snippet = item.get("snippet", "")
     source = item.get("source", "")
@@ -534,14 +526,13 @@ def news_summary_bilingual(item: dict) -> dict:
     if GEMINI_API_KEY:
         prompt = f"""
 당신은 의료기기 산업 애널리스트입니다.
-아래 뉴스 항목을 바탕으로 요약을 작성하세요.
+아래 뉴스 항목을 자연스럽고 짧게 요약하세요.
 
 규칙:
-- 영어 요약 2문장
-- 한국어 요약 2문장
+- 영어 요약 2문장 이하
+- 한국어 요약 2문장 이하
 - 한국어는 자연스럽고 간결하게
 - 기사에 없는 내용 추가 금지
-- 투자 조언 금지
 - 반드시 JSON만 출력
 
 JSON 형식:
@@ -568,32 +559,88 @@ JSON 형식:
                 pass
 
     base_en = snippet.replace("<b>", "").replace("</b>", "").strip()
-    if len(base_en) > 320:
-        base_en = base_en[:320] + "..."
-    base_ko = google_translate_ko(base_en)
+    if len(base_en) > 220:
+        base_en = base_en[:220] + "..."
+    base_ko = translate_ko(base_en)
 
     return {
         "en_summary": base_en or title,
-        "ko_summary": base_ko or google_translate_ko(title)
+        "ko_summary": base_ko or translate_ko(title)
     }
 
-# ── 3. 뉴스 HTML — 회사별 그룹핑 강화 ─────────────────────────
+# ── 3. Gemini용 배치 프롬프트 ─────────────────────────────────
+NEWS_BATCH_PROMPT = """
+당신은 초음파 의료기기 산업 전문 애널리스트입니다.
+아래 뉴스를 회사별로 그룹핑하여 HTML 뉴스레터 본문을 만드세요.
+
+규칙:
+1. 회사별로 묶어서 출력
+2. 회사명은 가능한 한 명확하게 표기
+3. 각 회사 아래 기사 수는 최대 5건
+4. 각 기사마다:
+   - 영어 요약 1~2문장
+   - 자연스러운 한국어 요약 1~2문장
+5. 카테고리는 신제품/기술, 인허가 승인, 인수/합병/파트너십, 시장/경영, 임상/연구 중 하나
+6. HTML만 출력
+7. <html>, <body> 태그는 만들지 말 것
+
+회사 헤더 형식:
+<div style="margin:20px 0 8px;padding:10px 16px;background:#1a5276;border-radius:6px;">
+  <h3 style="color:#fff;margin:0;font-size:16px;">COMPANY_NAME (N건)</h3>
+</div>
+
+기사 카드 형식:
+<div style="background:#f8f9fa;border-left:4px solid #2e86c1;padding:12px 16px;margin:4px 0 4px 16px;">
+  <span style="font-size:11px;font-weight:bold;color:#2e86c1;">CATEGORY</span>
+  <h4 style="margin:4px 0;font-size:14px;"><a href="URL" style="color:#1a5276;text-decoration:none;">TITLE</a></h4>
+  <p style="font-size:11px;color:#777;margin:2px 0;">DATE · SOURCE</p>
+  <p style="font-size:13px;color:#333;line-height:1.6;">ENGLISH_SUMMARY</p>
+  <p style="font-size:13px;color:#444;background:#eef6fb;padding:8px;border-radius:4px;line-height:1.6;">KOREAN_SUMMARY</p>
+</div>
+
+{{DATA_JSON}}
+"""
+
+PAPERS_BATCH_PROMPT = """
+당신은 인간공학 분야 전문 연구자이자 한국어 학술 편집자입니다.
+아래 논문들을 읽고 HTML 뉴스레터 본문을 만드세요.
+
+규칙:
+1. 각 논문마다 주제를 하나 분류: 근골격계질환 / 임상 인간공학 / 작업환경 개선 / 생체역학 / 역학·통계 / AI·기술 / 초음파 인간공학 / 기타
+2. 영어 제목은 원문 유지
+3. 한국어 제목은 자연스럽게 작성
+4. 한국어 요약은 2~3문장
+5. 직역투 금지
+6. HTML만 출력
+7. <html>, <body> 태그는 만들지 말 것
+
+논문 카드 형식:
+<div style="background:#f8f9fa;border-left:4px solid #27ae60;padding:14px 16px;margin:12px 0;">
+  <p style="font-size:11px;color:#27ae60;font-weight:bold;margin:0 0 4px;">TOPIC</p>
+  <h4 style="margin:0 0 4px;font-size:15px;color:#1a5276;">ENGLISH_TITLE</h4>
+  <p style="font-size:14px;color:#2c3e50;margin:2px 0 8px;">KOREAN_TITLE</p>
+  <p style="font-size:12px;color:#777;margin:4px 0 8px;line-height:1.8;">AUTHORS<br/>AFFILIATION<br/>JOURNAL · DATE · LINK</p>
+  <p style="font-size:13px;color:#333;line-height:1.7;"><strong>Summary:</strong> ENGLISH_SUMMARY</p>
+  <p style="font-size:13px;color:#444;background:#eaf7ee;padding:10px;border-radius:4px;line-height:1.8;"><strong>요약:</strong> KOREAN_SUMMARY</p>
+</div>
+
+{{DATA_JSON}}
+"""
+
+# ── 4. 뉴스 HTML ──────────────────────────────────────────────
 def group_news_by_company(items: list) -> dict:
     grouped = defaultdict(list)
     for item in items:
-        company = get_company(item)
-        item["company"] = company
+        item["company"] = get_company(item)
         item["detail_category"] = classify_news_category(item)
-        grouped[company].append(item)
+        grouped[item["company"]].append(item)
 
-    # 각 회사 내에서 날짜/제목 기준 정리
     for company in grouped:
         grouped[company] = sorted(
             grouped[company],
             key=lambda x: (x.get("date", ""), x.get("title", "")),
             reverse=True
         )
-
     return grouped
 
 def build_news_html(items: list) -> str:
@@ -601,14 +648,32 @@ def build_news_html(items: list) -> str:
         return "<p>오늘 관련 뉴스가 없습니다.</p>"
 
     grouped = group_news_by_company(items)
-
+    compact_items = []
     sorted_companies = sorted(
         grouped.items(),
         key=lambda x: (0 if x[0] != "기타 초음파 동향" else 1, -len(x[1]), x[0])
     )
 
-    html_blocks = []
+    for company, co_items in sorted_companies:
+        for item in co_items[:MAX_NEWS_PER_COMPANY]:
+            compact_items.append({
+                "company": company,
+                "detail_category": item["detail_category"],
+                "title": trim_title_suffix(item["title"]),
+                "snippet": item["snippet"],
+                "url": item["url"],
+                "date": item["date"][:16],
+                "source": item["source"],
+            })
 
+    compact_items = compact_items[:MAX_NEWS_FOR_GEMINI]
+
+    if GEMINI_API_KEY and compact_items:
+        result = call_gemini(NEWS_BATCH_PROMPT, json.dumps(compact_items, ensure_ascii=False))
+        if result:
+            return result
+
+    html_blocks = []
     for company, co_items in sorted_companies:
         html_blocks.append(
             f'''
@@ -618,7 +683,7 @@ def build_news_html(items: list) -> str:
 '''.strip()
         )
 
-        for item in co_items[:8]:
+        for item in co_items[:MAX_NEWS_PER_COMPANY]:
             title = trim_title_suffix(item["title"])
             summaries = news_summary_bilingual(item)
 
@@ -638,7 +703,7 @@ def build_news_html(items: list) -> str:
 
     return "\n".join(html_blocks)
 
-# ── 4. 논문 HTML — 자연스러운 한국어 강화 ────────────────────
+# ── 5. 논문 HTML ──────────────────────────────────────────────
 TOPIC_MAP = {
     "초음파 인간공학": ["ultrasound", "sonographer", "transducer", "scanning"],
     "근골격계질환": ["musculoskeletal", "carpal tunnel", "shoulder", "wrist", "tendon", "repetitive"],
@@ -646,7 +711,7 @@ TOPIC_MAP = {
     "작업환경 개선": ["workstation", "workplace", "posture", "pointing device", "mouse", "sitting", "standing"],
     "생체역학": ["biomechanics", "muscle activity", "emg", "force", "kinematics"],
     "역학·통계": ["epidemiology", "prevalence", "survey", "cohort", "cross-sectional", "retrospective"],
-    "AI기술": ["machine learning", "deep learning", "algorithm", "artificial intelligence", "ai"],
+    "AI·기술": ["machine learning", "deep learning", "algorithm", "artificial intelligence", "ai"],
 }
 
 def get_topic(paper: dict) -> str:
@@ -660,9 +725,29 @@ def build_papers_html(papers: list) -> str:
     if not papers:
         return "<p>오늘 새 논문이 없습니다.</p>"
 
-    html_blocks = []
+    papers = papers[:MAX_PAPERS_FOR_GEMINI]
 
-    for p in papers[:10]:
+    compact_papers = []
+    for p in papers:
+        doi_or_link = f"https://doi.org/{p['doi']}" if p.get("doi") else p.get("link", "")
+        compact_papers.append({
+            "topic": get_topic(p),
+            "title": p.get("title", ""),
+            "authors": p.get("authors", ""),
+            "affiliations": p.get("affiliations", "") or "소속 정보 없음",
+            "abstract": p.get("abstract", "")[:1000],
+            "journal": p.get("journal", ""),
+            "pub_date": p.get("pub_date", ""),
+            "link": doi_or_link,
+        })
+
+    if GEMINI_API_KEY and compact_papers:
+        result = call_gemini(PAPERS_BATCH_PROMPT, json.dumps(compact_papers, ensure_ascii=False))
+        if result:
+            return result
+
+    html_blocks = []
+    for p in papers:
         topic = get_topic(p)
         korean = natural_korean_summary(
             title=p.get("title", ""),
@@ -672,18 +757,17 @@ def build_papers_html(papers: list) -> str:
         )
 
         abstract_en = (p.get("abstract", "") or "").strip()
-        if len(abstract_en) > 700:
-            abstract_en = abstract_en[:700] + "..."
+        if len(abstract_en) > 500:
+            abstract_en = abstract_en[:500] + "..."
 
-        doi = p.get("doi", "")
-        if doi:
-            doi_html = f' · <a href="https://doi.org/{safe_html(doi)}" style="color:#2e86c1;">원문 보기</a>'
+        if p.get("doi"):
+            link_html = f' · <a href="https://doi.org/{safe_html(p["doi"])}" style="color:#2e86c1;">원문 보기</a>'
         elif p.get("link"):
-            doi_html = f' · <a href="{safe_html(p["link"])}" style="color:#2e86c1;">원문 보기</a>'
+            link_html = f' · <a href="{safe_html(p["link"])}" style="color:#2e86c1;">원문 보기</a>'
         else:
-            doi_html = ""
+            link_html = ""
 
-        affiliation = p.get("affiliations", "")[:200] if p.get("affiliations") else "소속 정보 없음"
+        affiliation = p.get("affiliations", "")[:180] if p.get("affiliations") else "소속 정보 없음"
 
         html_blocks.append(
             f'''
@@ -694,7 +778,7 @@ def build_papers_html(papers: list) -> str:
   <p style="font-size:12px;color:#777;margin:4px 0 8px;line-height:1.8;">
     {safe_html(p.get("authors", ""))}<br/>
     {safe_html(affiliation)}<br/>
-    {safe_html(p.get("journal", ""))} · {safe_html(p.get("pub_date", ""))}{doi_html}
+    {safe_html(p.get("journal", ""))} · {safe_html(p.get("pub_date", ""))}{link_html}
   </p>
   <p style="font-size:13px;color:#333;line-height:1.7;"><strong>Summary:</strong> {safe_html(abstract_en)}</p>
   <p style="font-size:13px;color:#444;background:#eaf7ee;padding:10px;border-radius:4px;line-height:1.8;"><strong>요약:</strong> {safe_html(korean["ko_summary"])}</p>
@@ -704,7 +788,7 @@ def build_papers_html(papers: list) -> str:
 
     return "\n".join(html_blocks)
 
-# ── 5. 이메일 조합 & 발송 ──────────────────────────────────────
+# ── 6. 이메일 조합 & 발송 ──────────────────────────────────────
 def assemble_email(news_html, papers_html, n_news, n_papers):
     today = datetime.date.today().strftime("%Y년 %m월 %d일")
     return f"""<!DOCTYPE html>
@@ -717,7 +801,7 @@ def assemble_email(news_html, papers_html, n_news, n_papers):
   style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1);">
   <tr><td style="background:linear-gradient(135deg,#1a5276,#2e86c1);padding:30px 40px;text-align:center;">
     <h1 style="color:#fff;margin:0;font-size:22px;">초음파 산업 &amp; 인간공학 연구 다이제스트</h1>
-    <p style="color:#aed6f1;margin:6px 0 0;font-size:13px;">회사별 그룹핑 · 자연스러운 한국어 요약</p>
+    <p style="color:#aed6f1;margin:6px 0 0;font-size:13px;">회사별 그룹핑 · 실행 시간 최적화</p>
     <p style="color:#d4e6f1;margin:4px 0 0;font-size:12px;">{today}</p>
   </td></tr>
   <tr><td style="padding:16px 40px;background:#eaf2f8;">
@@ -769,11 +853,9 @@ def main():
     all_news = fetch_all_ultrasound_news() + fetch_fda_510k()
 
     print("인간공학 논문 수집 중...")
-    papers_raw = fetch_pubmed_papers("ergonomics", 15)
-    time.sleep(2)
-    papers_raw += fetch_arxiv_papers("ergonomics", 8)
-    time.sleep(2)
-    papers_raw += fetch_semantic_scholar("ergonomics workplace", 10)
+    papers_raw = fetch_pubmed_papers("ergonomics", 10)
+    papers_raw += fetch_arxiv_papers("ergonomics", 5)
+    papers_raw += fetch_semantic_scholar("ergonomics workplace", 5)
 
     seen = set()
     all_papers = []
@@ -791,8 +873,8 @@ def main():
 
     html_body = assemble_email(news_html, papers_html, len(all_news), len(all_papers))
     subject = f"초음파 & 인간공학 다이제스트 | {today} | 뉴스 {len(all_news)}건, 논문 {len(all_papers)}편"
-    send_email(subject, html_body)
 
+    send_email(subject, html_body)
     print("완료!")
 
 if __name__ == "__main__":
