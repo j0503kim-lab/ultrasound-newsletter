@@ -2,7 +2,7 @@ name: 매일 초음파 & 인간공학 뉴스레터
 
 on:
   schedule:
-    - cron: '0 22 * * *'
+    - cron: '0 22 * * *'   # 한국시간 오전 7시 = UTC 전날 22시
   workflow_dispatch:
 
 concurrency:
