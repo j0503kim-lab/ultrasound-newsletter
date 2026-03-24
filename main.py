@@ -570,46 +570,105 @@ def get_topic(paper: dict) -> str:
     return "기타"
 
 
-def fallback_ux_points(topic: str, abstract: str) -> list[str]:
-    text = abstract.lower()
-    points = []
+def fallback_paper_structured_summary(topic: str, title: str, abstract: str) -> dict:
+    text = (title + " " + abstract).lower()
+
+    topic_summary = {
+        "초음파 인간공학": "초음파 검사 수행 과정에서 작업 자세, 반복 동작, 검사 흐름이 사용자 부담에 미치는 영향을 다룹니다.",
+        "근골격계질환": "반복 사용 환경에서 발생하는 근골격계 부담 요인과 이를 줄이기 위한 설계·운영 개선점을 다룹니다.",
+        "임상 인간공학": "임상 현장에서 의료진의 수행 오류, 피로, 인지 부담을 줄이기 위한 인간공학적 요인을 다룹니다.",
+        "작업환경 개선": "작업 환경, 정보 배치, 절차 설계가 성능과 피로도에 주는 영향을 다룹니다.",
+        "생체역학": "자세, 힘, 움직임 측정 기반으로 신체 부담과 수행 효율을 정량적으로 분석합니다.",
+        "역학·통계": "특정 작업군의 위험요인과 관련 변수를 조사해 관리 우선순위를 정하는 데 초점을 둡니다.",
+        "AI·기술": "AI 또는 자동화 기술이 사용자의 판단, 신뢰, 개입 방식에 미치는 영향을 다룹니다.",
+    }
+
+    method_bits = []
+    if any(k in text for k in ["randomized", "trial", "controlled"]):
+        method_bits.append("비교 실험 또는 무작위 시험 기반")
+    if any(k in text for k in ["survey", "questionnaire", "cross-sectional"]):
+        method_bits.append("설문 또는 단면 조사 기반")
+    if any(k in text for k in ["review", "scoping review", "systematic review", "meta-analysis"]):
+        method_bits.append("문헌고찰 기반")
+    if any(k in text for k in ["emg", "kinematic", "biomechanics", "motion", "force"]):
+        method_bits.append("생체역학·동작 측정 기반")
+    if any(k in text for k in ["interview", "qualitative", "focus group"]):
+        method_bits.append("정성 인터뷰 또는 관찰 기반")
+    if any(k in text for k in ["machine learning", "deep learning", "model", "algorithm", "ai"]):
+        method_bits.append("AI/모델 평가 기반")
+    if not method_bits:
+        method_bits.append("초록 기준으로 연구 설계와 핵심 변수를 정리")
+
+    result_line = "초록에 제시된 비교 결과와 핵심 변수의 방향성을 중심으로, 실제 업무 설계에 참고할 만한 차이 또는 위험 요인을 확인할 수 있습니다."
+    if any(k in text for k in ["significant", "improved", "improvement", "reduced", "lower"]):
+        result_line = "개입 또는 조건 차이에 따라 작업부하, 수행 효율, 사용성 중 일부 지표가 개선되었음을 시사합니다."
+    if any(k in text for k in ["no difference", "noninferiority", "non-inferiority"]):
+        result_line = "기존 방식과 비교해 성능 저하 없이 대체 가능하거나 비열등함을 보였다는 해석이 가능합니다."
+    if any(k in text for k in ["risk", "hazard", "burden", "fatigue", "pain"]):
+        result_line = "작업부하·피로·통증 또는 위험 노출과 관련된 핵심 요인이 결과 변수로 제시됩니다."
+
+    ux_points = []
     if topic == "초음파 인간공학":
-        points += [
-            "프로브 그립·버튼 위치·케이블 처리 등 검사 자세 부담을 줄이는 UI/하드웨어 연계 포인트를 확인합니다.",
-            "반복 스캔 동작을 줄일 수 있도록 프리셋, 자동 측정, 최소 탭 워크플로우를 우선 검토합니다.",
+        ux_points += [
+            "검사 중 반복 입력과 손목 회전을 줄이도록 프리셋 진입, 측정, 저장까지의 탭 수를 축소하는 UI 검토가 필요합니다.",
+            "프로브를 쥔 상태에서도 자주 쓰는 기능에 빠르게 접근할 수 있도록 물리 버튼·소프트키 역할 분담을 재정의할 수 있습니다.",
+            "케이블, 프로브, 콘솔 조작이 동시에 발생하는 상황을 고려해 화면 전환을 줄이고 자동 상태 유지 기능을 강화할 근거로 활용할 수 있습니다.",
         ]
     elif topic == "근골격계질환":
-        points += [
-            "검사 단계 수와 손목·어깨 반복 동작을 줄이는 UI 흐름 개선이 중요합니다.",
-            "자주 쓰는 기능은 상위 노출하고, 작은 클릭 타깃이나 깊은 메뉴 구조는 축소합니다.",
+        ux_points += [
+            "반복 자세 부담이 큰 작업에서는 측정·주석·저장 절차를 단축해 동일 동작의 누적을 줄이는 것이 중요합니다.",
+            "작은 클릭 타깃, 깊은 메뉴, 잦은 모드 전환처럼 상지 부담을 키우는 UI 패턴을 우선 제거할 수 있습니다.",
+            "검사 시간 단축뿐 아니라 자세 변경 빈도를 줄이는 인터랙션 설계를 핵심 성과지표로 두는 방향이 적절합니다.",
+        ]
+    elif topic == "임상 인간공학":
+        ux_points += [
+            "임상 맥락에서 오류 가능성이 높은 단계에 대해 확인 피드백, 상태 가시성, 다음 행동 유도 문구를 더 명확히 설계할 수 있습니다.",
+            "숙련도 차이가 큰 사용자군을 고려해 초심자용 가이드와 숙련자용 단축 흐름을 함께 제공하는 구조를 검토할 수 있습니다.",
+            "복합 작업 중 인지 전환 비용을 줄이기 위해 검사 맥락에 맞는 정보 우선순위와 알림 밀도 조정이 필요합니다.",
         ]
     elif topic == "작업환경 개선":
-        points += [
-            "주요 작업 시나리오 기준으로 화면 배치, 정보 우선순위, 알림 밀도를 재조정할 근거로 활용합니다.",
-            "모니터 거리·시선 이동·입력 장치 전환을 줄이는 레이아웃 설계에 연결할 수 있습니다.",
+        ux_points += [
+            "모니터 시선 이동, 키보드/터치 전환, 입력 장치 왕복을 줄이도록 화면 배치와 정보 계층을 재설계할 수 있습니다.",
+            "빈도가 높은 시나리오를 기준으로 홈·검사·리뷰 화면의 핵심 정보 배치를 표준화할 근거로 활용할 수 있습니다.",
+            "사용자 피로를 줄이는 방향으로 불필요한 경고, 중복 확인, 시각적 잡음을 줄이는 정책을 검토할 수 있습니다.",
+        ]
+    elif topic == "생체역학":
+        ux_points += [
+            "신체 부담이 큰 순간에 어떤 조작이 겹치는지 분석해, 그 구간의 인터랙션 수를 줄이는 설계가 필요합니다.",
+            "검사 자세 변화와 동기화되는 UI 요소를 줄여 한 손 또는 최소 시선 이동으로 끝나는 조작 흐름을 지향할 수 있습니다.",
+            "정량 지표 기반으로 부담이 큰 시나리오를 우선순위화해 UX 개선 로드맵을 세우는 데 활용할 수 있습니다.",
         ]
     elif topic == "AI·기술":
-        points += [
-            "AI 제안 결과는 신뢰도, 근거, 재검토 경로를 함께 보여주는 UX가 필요합니다.",
-            "자동화 기능 도입 시 사용자가 개입·수정할 수 있는 인터랙션을 유지해야 합니다.",
+        ux_points += [
+            "AI 결과는 자동 표시만으로 끝내지 말고 근거, 신뢰도, 수정 경로를 함께 제공해 사용자가 판단권을 유지하도록 해야 합니다.",
+            "자동화가 시간을 줄이더라도 재확인 비용이 커지면 체감 효율이 떨어지므로, 검증 인터랙션을 최소화하는 설계가 필요합니다.",
+            "새 기술 도입 시 기존 검사 흐름을 크게 깨지 않는 점진적 개입 방식이 현장 수용성을 높일 수 있습니다.",
         ]
     else:
-        points += [
-            "연구의 주요 변수와 결과를 현재 검사 워크플로우의 병목 구간과 연결해 볼 수 있습니다.",
-            "UI 개선 포인트를 도출할 때 실제 사용 맥락, 인지 부하, 클릭 수 변화와 함께 해석하는 것이 좋습니다.",
+        ux_points += [
+            "연구에서 제시한 부담 요인이나 성능 차이를 현재 초음파 검사 워크플로우의 병목 단계와 연결해 개선 우선순위를 정할 수 있습니다.",
+            "복잡한 절차를 줄이고 핵심 결정 지점의 정보 가시성을 높이는 방향으로 UI를 재구성할 근거로 활용할 수 있습니다.",
+            "시간 절감뿐 아니라 인지부하와 물리적 부담 감소를 함께 UX 성과지표에 포함시키는 데 참고할 수 있습니다.",
         ]
 
-    if "fatigue" in text or "workload" in text:
-        points.append("사용자 피로와 작업부하를 줄이기 위해 단계 축소, 자동완성, 시각적 강조 체계를 함께 검토합니다.")
+    if "fatigue" in text or "workload" in text or "burden" in text:
+        ux_points.append("사용자 피로·작업부하 지표를 기능 성공률과 함께 추적해, 실제 현장 효율을 반영하는 UX 평가체계를 설계할 수 있습니다.")
     if "usability" in text or "interface" in text:
-        points.append("사용성 결과는 메뉴 구조 단순화와 정보 계층 재설계 우선순위를 정하는 근거로 사용할 수 있습니다.")
+        ux_points.append("사용성 결과를 메뉴 구조 단순화, 정보 우선순위 조정, 학습 부담 감소 같은 구체적 UI 과제로 연결할 수 있습니다.")
+    if "ultrasound" in text or "sonograph" in text or "transducer" in text:
+        ux_points.append("프로브 조작과 화면 조작이 동시에 일어나는 초음파 특성을 반영해, 한 손 사용성과 빠른 복귀 흐름을 강화하는 데 직접 참고할 수 있습니다.")
 
-    # 최대 3개
     deduped = []
-    for p in points:
+    for p in ux_points:
         if p not in deduped:
             deduped.append(p)
-    return deduped[:3]
+
+    return {
+        "research_topic": topic_summary.get(topic, "논문 초록을 바탕으로 작업부하, 사용성, 수행 성능과 관련된 핵심 연구 질문을 정리합니다."),
+        "methodology": " / ".join(method_bits[:3]),
+        "key_result": result_line,
+        "ux_insights": deduped[:4],
+    }
 
 
 def enrich_papers_with_korean_and_ux(papers: list) -> list:
@@ -636,12 +695,15 @@ def enrich_papers_with_korean_and_ux(papers: list) -> list:
 
 규칙:
 - 반드시 JSON 배열만 출력합니다.
-- 각 항목에는 id, ko_title, ko_summary, ux_points 를 포함합니다.
+- 각 항목에는 id, ko_title, research_topic, methodology, key_result, ux_insights 를 포함합니다.
 - ko_title: 자연스러운 한국어 제목 1개
-- ko_summary: 직역투 없는 자연스러운 한국어 요약 2~3문장
-- ux_points: 삼성메디슨 UX 업무 적용 포인트 2~3개 배열
-- 적용 포인트는 초록 내용에서 합리적으로 도출하되 과장하지 않습니다.
-- 의료기기 UI/UX, 검사 워크플로우, 자동화 신뢰성, 인지부하, 스캔 효율, 작업부하 관점에서 작성합니다.
+- research_topic: 핵심 연구 주제를 한국어 1~2문장으로 정리
+- methodology: 주요 방법론을 한국어 1~2문장으로 정리. 연구 설계, 참가자/데이터, 측정 방식이 보이면 반영
+- key_result: 핵심 결과를 한국어 1~2문장으로 정리. 초록에 없는 결론은 쓰지 않음
+- ux_insights: 삼성메디슨 UX 업무에 적용 가능한 인사이트 3~4개 배열
+- 4번이 가장 중요합니다. 각 인사이트는 반드시 초음파 진단 장비 UX, 검사 워크플로우, 자동 측정/판독 보조, 정보 구조, 버튼/터치 조작, 인지부하, 작업부하 감소 중 하나 이상과 연결해 구체적으로 씁니다.
+- 추상적 표현(예: "사용성을 높일 수 있다")만 쓰지 말고, 어떤 화면/기능/조작 원칙에 연결되는지 구체적으로 적습니다.
+- 논문 초록 범위를 벗어난 과장, 임상적 단정, 회사 내부 사정을 가정한 제안은 금지합니다.
 
 입력 데이터:
 {json.dumps(compact, ensure_ascii=False)}
@@ -662,17 +724,33 @@ def enrich_papers_with_korean_and_ux(papers: list) -> list:
         topic = get_topic(p)
         row = parsed_map.get(i, {})
         ko_title = normalize_space(row.get("ko_title", "")) or translate_ko(p.get("title", ""))
-        ko_summary = normalize_space(row.get("ko_summary", "")) or translate_ko(p.get("abstract", "")[:700])
-        ux_points = row.get("ux_points", []) if isinstance(row.get("ux_points", []), list) else []
-        if not ux_points:
-            ux_points = fallback_ux_points(topic, p.get("abstract", ""))
+        structured = {
+            "research_topic": normalize_space(row.get("research_topic", "")),
+            "methodology": normalize_space(row.get("methodology", "")),
+            "key_result": normalize_space(row.get("key_result", "")),
+            "ux_insights": row.get("ux_insights", []) if isinstance(row.get("ux_insights", []), list) else [],
+        }
+
+        fallback = fallback_paper_structured_summary(topic, p.get("title", ""), p.get("abstract", ""))
+        if not structured["research_topic"]:
+            structured["research_topic"] = fallback["research_topic"]
+        if not structured["methodology"]:
+            structured["methodology"] = fallback["methodology"]
+        if not structured["key_result"]:
+            structured["key_result"] = fallback["key_result"]
+        if not structured["ux_insights"]:
+            structured["ux_insights"] = fallback["ux_insights"]
+
+        structured["ux_insights"] = [normalize_space(x) for x in structured["ux_insights"] if normalize_space(x)][:4]
 
         enriched.append({
             **p,
             "topic": topic,
             "ko_title": ko_title,
-            "ko_summary": ko_summary,
-            "ux_points": ux_points[:3],
+            "research_topic": structured["research_topic"],
+            "methodology": structured["methodology"],
+            "key_result": structured["key_result"],
+            "ux_insights": structured["ux_insights"],
         })
     return enriched
 
@@ -783,7 +861,7 @@ def build_papers_html(papers: list) -> str:
             link = f'https://doi.org/{safe_html(p["doi"])}'
         else:
             link = safe_html(p.get("link", ""))
-        ux_html = "".join([f"<li style=\"margin:0 0 4px;\">{safe_html(point)}</li>" for point in p.get("ux_points", [])])
+        ux_html = "".join([f"<li style=\"margin:0 0 6px;\">{safe_html(point)}</li>" for point in p.get("ux_insights", [])])
         evidence_label = {
             "peer_reviewed_or_indexed": "PubMed 색인",
             "preprint": "Preprint",
@@ -800,11 +878,22 @@ def build_papers_html(papers: list) -> str:
     {safe_html(p.get("journal", ""))} · {safe_html(p.get("pub_date", ""))} · {safe_html(evidence_label)}
     {' · <a href="' + link + '" style="color:#2e86c1;">원문 보기</a>' if link else ''}
   </p>
-  <p style="font-size:13px;color:#333;line-height:1.7;"><strong>Summary:</strong> {safe_html(abstract_en)}</p>
-  <p style="font-size:13px;color:#444;background:#eaf7ee;padding:10px;border-radius:4px;line-height:1.8;"><strong>요약:</strong> {safe_html(p.get("ko_summary", ""))}</p>
+  <p style="font-size:13px;color:#333;line-height:1.7;"><strong>Abstract:</strong> {safe_html(abstract_en)}</p>
+  <div style="background:#eef6fb;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;">
+    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1a5276;">1) 핵심 연구 주제</p>
+    <p style="margin:0;font-size:13px;color:#34495e;">{safe_html(p.get("research_topic", ""))}</p>
+  </div>
+  <div style="background:#f7fafc;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;">
+    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1a5276;">2) 주요 방법론</p>
+    <p style="margin:0;font-size:13px;color:#34495e;">{safe_html(p.get("methodology", ""))}</p>
+  </div>
+  <div style="background:#eaf7ee;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;">
+    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1f6f43;">3) 핵심 결과</p>
+    <p style="margin:0;font-size:13px;color:#2f4f3e;">{safe_html(p.get("key_result", ""))}</p>
+  </div>
   <div style="background:#fff7e8;border:1px solid #f4d08b;padding:10px 12px;border-radius:4px;margin-top:10px;">
-    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#9a6700;">삼성메디슨 UX 업무 적용 포인트</p>
-    <ul style="margin:0;padding-left:18px;font-size:13px;color:#5b4a1f;line-height:1.7;">{ux_html}</ul>
+    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#9a6700;">4) 삼성메디슨 UX 업무에 적용 가능한 인사이트</p>
+    <ul style="margin:0;padding-left:18px;font-size:13px;color:#5b4a1f;line-height:1.8;">{ux_html}</ul>
   </div>
 </div>'''
         )
@@ -853,7 +942,7 @@ def assemble_email(news_html: str, papers_html: str, n_news: int, n_papers: int)
   <tr>
     <td style="padding:20px 30px 24px;">
       <h2 style="margin:0 0 12px;color:#1a5276;border-bottom:2px solid #27ae60;padding-bottom:8px;">인간공학 논문 동향</h2>
-      <p style="margin:0 0 10px;font-size:12px;color:#6b7280;">논문 원제, 자연스러운 한국어 요약, 그리고 삼성메디슨 UX 업무에 연결 가능한 적용 포인트를 함께 정리했습니다.</p>
+      <p style="margin:0 0 10px;font-size:12px;color:#6b7280;">논문 초록을 바탕으로 핵심 연구 주제, 주요 방법론, 핵심 결과, 그리고 삼성메디슨 UX 업무에 적용 가능한 인사이트를 구조화해 정리했습니다.</p>
       {papers_html}
     </td>
   </tr>
