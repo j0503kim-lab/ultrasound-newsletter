@@ -3,7 +3,7 @@
 초음파 산업 & 인간공학 연구 뉴스레터
 - 신뢰 가능한 출처 중심 필터링
 - 초음파 회사별 그룹핑
-- 인간공학 논문 한국어 번역 + 삼성메디슨 UX 적용 포인트 포함
+- 인간공학 논문 한국어 번역 + 구조화 요약 + 삼성메디슨 UX 적용 포인트 포함
 - GitHub Actions 실행 시간 최적화
 """
 
@@ -28,6 +28,7 @@ try:
 except Exception:
     GoogleTranslator = None
 
+
 # ── 설정 ──────────────────────────────────────────────────────
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "j0503.kim@gmail.com")
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
@@ -46,6 +47,7 @@ MAX_PAPERS = 6
 USER_AGENT = {
     "User-Agent": "Mozilla/5.0 (compatible; UltrasoundErgoDigest/1.0; +https://github.com/)"
 }
+
 
 # ── 신뢰 출처 필터 ────────────────────────────────────────────
 TRUSTED_NEWS_SOURCES = {
@@ -85,6 +87,7 @@ RSS_QUERIES = {
     ),
     "규제·인허가": '(("FDA clearance" OR "510(k)" OR "CE mark" OR "De Novo") ultrasound)',
 }
+
 
 # ── 노이즈 필터 ────────────────────────────────────────────────
 NOISE_KEYWORDS = [
@@ -583,21 +586,20 @@ def fallback_paper_structured_summary(topic: str, title: str, abstract: str) -> 
         "AI·기술": "AI 또는 자동화 기술이 사용자의 판단, 신뢰, 개입 방식에 미치는 영향을 다룹니다.",
     }
 
-    method_bits = []
     if any(k in text for k in ["randomized", "trial", "controlled"]):
-        method_bits.append("비교 실험 또는 무작위 시험 기반")
-    if any(k in text for k in ["survey", "questionnaire", "cross-sectional"]):
-        method_bits.append("설문 또는 단면 조사 기반")
-    if any(k in text for k in ["review", "scoping review", "systematic review", "meta-analysis"]):
-        method_bits.append("문헌고찰 기반")
-    if any(k in text for k in ["emg", "kinematic", "biomechanics", "motion", "force"]):
-        method_bits.append("생체역학·동작 측정 기반")
-    if any(k in text for k in ["interview", "qualitative", "focus group"]):
-        method_bits.append("정성 인터뷰 또는 관찰 기반")
-    if any(k in text for k in ["machine learning", "deep learning", "model", "algorithm", "ai"]):
-        method_bits.append("AI/모델 평가 기반")
-    if not method_bits:
-        method_bits.append("초록 기준으로 연구 설계와 핵심 변수를 정리")
+        research_method = "비교군 또는 조건 차이를 둔 실험/시험 설계로, 개입 전후 또는 집단 간 차이를 평가했습니다."
+    elif any(k in text for k in ["survey", "questionnaire", "cross-sectional"]):
+        research_method = "설문 또는 단면조사 방식으로 참가자의 작업 특성, 증상, 인식 변수를 수집해 비교·분석했습니다."
+    elif any(k in text for k in ["review", "scoping review", "systematic review", "meta-analysis"]):
+        research_method = "기존 선행연구를 체계적으로 검토해 주요 위험요인, 경향, 설계 시사점을 종합했습니다."
+    elif any(k in text for k in ["emg", "kinematic", "biomechanics", "motion", "force"]):
+        research_method = "동작, 근활성도, 힘 등의 생체역학 지표를 측정해 작업 자세와 부담 정도를 정량적으로 분석했습니다."
+    elif any(k in text for k in ["interview", "qualitative", "focus group"]):
+        research_method = "인터뷰·관찰 등 정성적 방법으로 사용 경험과 문제 상황을 수집해 핵심 패턴을 정리했습니다."
+    elif any(k in text for k in ["machine learning", "deep learning", "model", "algorithm", "ai"]):
+        research_method = "데이터 기반 모델 또는 알고리즘을 적용해 예측 성능이나 분류 정확도를 비교 평가했습니다."
+    else:
+        research_method = "초록에 드러난 연구 대상, 비교 조건, 측정 지표를 바탕으로 핵심 실험 설계를 간단히 정리했습니다."
 
     result_line = "초록에 제시된 비교 결과와 핵심 변수의 방향성을 중심으로, 실제 업무 설계에 참고할 만한 차이 또는 위험 요인을 확인할 수 있습니다."
     if any(k in text for k in ["significant", "improved", "improvement", "reduced", "lower"]):
@@ -664,8 +666,9 @@ def fallback_paper_structured_summary(topic: str, title: str, abstract: str) -> 
             deduped.append(p)
 
     return {
+        "ko_abstract": translate_ko(abstract[:1800]),
         "research_topic": topic_summary.get(topic, "논문 초록을 바탕으로 작업부하, 사용성, 수행 성능과 관련된 핵심 연구 질문을 정리합니다."),
-        "methodology": " / ".join(method_bits[:3]),
+        "research_method": research_method,
         "key_result": result_line,
         "ux_insights": deduped[:4],
     }
@@ -695,14 +698,18 @@ def enrich_papers_with_korean_and_ux(papers: list) -> list:
 
 규칙:
 - 반드시 JSON 배열만 출력합니다.
-- 각 항목에는 id, ko_title, research_topic, methodology, key_result, ux_insights 를 포함합니다.
+- 각 항목에는 id, ko_title, ko_abstract, research_topic, research_method, key_result, ux_insights 를 포함합니다.
 - ko_title: 자연스러운 한국어 제목 1개
+- ko_abstract: 초록의 자연스러운 한국어 번역. 원문 의미를 유지하고, 과장 없이 번역
 - research_topic: 핵심 연구 주제를 한국어 1~2문장으로 정리
-- methodology: 주요 방법론을 한국어 1~2문장으로 정리. 연구 설계, 참가자/데이터, 측정 방식이 보이면 반영
+- research_method: 주요 연구 방법을 한국어 1~2문장으로 정리
+- research_method에는 결과를 도출하기 위해 사용한 핵심 실험 설계 내용이 들어가야 합니다.
+- research_method는 처음 보는 사람도 이것만 읽으면 연구가 어떻게 진행됐는지 이해할 수 있어야 합니다.
+- research_method는 너무 길게 쓰지 말고, 2줄 이내 분량의 핵심만 정리합니다.
 - key_result: 핵심 결과를 한국어 1~2문장으로 정리. 초록에 없는 결론은 쓰지 않음
 - ux_insights: 삼성메디슨 UX 업무에 적용 가능한 인사이트 3~4개 배열
 - 4번이 가장 중요합니다. 각 인사이트는 반드시 초음파 진단 장비 UX, 검사 워크플로우, 자동 측정/판독 보조, 정보 구조, 버튼/터치 조작, 인지부하, 작업부하 감소 중 하나 이상과 연결해 구체적으로 씁니다.
-- 추상적 표현(예: "사용성을 높일 수 있다")만 쓰지 말고, 어떤 화면/기능/조작 원칙에 연결되는지 구체적으로 적습니다.
+- 추상적 표현만 쓰지 말고, 어떤 화면/기능/조작 원칙에 연결되는지 구체적으로 적습니다.
 - 논문 초록 범위를 벗어난 과장, 임상적 단정, 회사 내부 사정을 가정한 제안은 금지합니다.
 
 입력 데이터:
@@ -724,9 +731,11 @@ def enrich_papers_with_korean_and_ux(papers: list) -> list:
         topic = get_topic(p)
         row = parsed_map.get(i, {})
         ko_title = normalize_space(row.get("ko_title", "")) or translate_ko(p.get("title", ""))
+        ko_abstract = normalize_space(row.get("ko_abstract", "")) or translate_ko(p.get("abstract", "")[:1800])
+
         structured = {
             "research_topic": normalize_space(row.get("research_topic", "")),
-            "methodology": normalize_space(row.get("methodology", "")),
+            "research_method": normalize_space(row.get("research_method", "")),
             "key_result": normalize_space(row.get("key_result", "")),
             "ux_insights": row.get("ux_insights", []) if isinstance(row.get("ux_insights", []), list) else [],
         }
@@ -734,8 +743,8 @@ def enrich_papers_with_korean_and_ux(papers: list) -> list:
         fallback = fallback_paper_structured_summary(topic, p.get("title", ""), p.get("abstract", ""))
         if not structured["research_topic"]:
             structured["research_topic"] = fallback["research_topic"]
-        if not structured["methodology"]:
-            structured["methodology"] = fallback["methodology"]
+        if not structured["research_method"]:
+            structured["research_method"] = fallback["research_method"]
         if not structured["key_result"]:
             structured["key_result"] = fallback["key_result"]
         if not structured["ux_insights"]:
@@ -747,8 +756,9 @@ def enrich_papers_with_korean_and_ux(papers: list) -> list:
             **p,
             "topic": topic,
             "ko_title": ko_title,
+            "ko_abstract": ko_abstract,
             "research_topic": structured["research_topic"],
-            "methodology": structured["methodology"],
+            "research_method": structured["research_method"],
             "key_result": structured["key_result"],
             "ux_insights": structured["ux_insights"],
         })
@@ -857,16 +867,24 @@ def build_papers_html(papers: list) -> str:
         abstract_en = normalize_space(p.get("abstract", ""))
         if len(abstract_en) > 520:
             abstract_en = abstract_en[:520] + "..."
+
+        abstract_ko = normalize_space(p.get("ko_abstract", ""))
+        if len(abstract_ko) > 700:
+            abstract_ko = abstract_ko[:700] + "..."
+
         if p.get("doi"):
             link = f'https://doi.org/{safe_html(p["doi"])}'
         else:
             link = safe_html(p.get("link", ""))
+
         ux_html = "".join([f"<li style=\"margin:0 0 6px;\">{safe_html(point)}</li>" for point in p.get("ux_insights", [])])
+
         evidence_label = {
             "peer_reviewed_or_indexed": "PubMed 색인",
             "preprint": "Preprint",
             "index_metadata": "색인 메타데이터",
         }.get(p.get("evidence", ""), p.get("source", ""))
+
         blocks.append(
             f'''<div style="background:#f8f9fa;border-left:4px solid #27ae60;padding:14px 16px;margin:12px 0;">
   <p style="font-size:11px;color:#27ae60;font-weight:bold;margin:0 0 4px;">{safe_html(p.get("topic", "기타"))}</p>
@@ -878,19 +896,28 @@ def build_papers_html(papers: list) -> str:
     {safe_html(p.get("journal", ""))} · {safe_html(p.get("pub_date", ""))} · {safe_html(evidence_label)}
     {' · <a href="' + link + '" style="color:#2e86c1;">원문 보기</a>' if link else ''}
   </p>
+
   <p style="font-size:13px;color:#333;line-height:1.7;"><strong>Abstract:</strong> {safe_html(abstract_en)}</p>
+  <div style="background:#fdf7ea;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;">
+    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#9a6700;">초록 한국어 번역</p>
+    <p style="margin:0;font-size:13px;color:#5b4a1f;">{safe_html(abstract_ko)}</p>
+  </div>
+
   <div style="background:#eef6fb;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;">
     <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1a5276;">1) 핵심 연구 주제</p>
     <p style="margin:0;font-size:13px;color:#34495e;">{safe_html(p.get("research_topic", ""))}</p>
   </div>
+
   <div style="background:#f7fafc;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;">
-    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1a5276;">2) 주요 방법론</p>
-    <p style="margin:0;font-size:13px;color:#34495e;">{safe_html(p.get("methodology", ""))}</p>
+    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1a5276;">2) 주요 연구 방법</p>
+    <p style="margin:0;font-size:13px;color:#34495e;">{safe_html(p.get("research_method", ""))}</p>
   </div>
+
   <div style="background:#eaf7ee;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;">
     <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1f6f43;">3) 핵심 결과</p>
     <p style="margin:0;font-size:13px;color:#2f4f3e;">{safe_html(p.get("key_result", ""))}</p>
   </div>
+
   <div style="background:#fff7e8;border:1px solid #f4d08b;padding:10px 12px;border-radius:4px;margin-top:10px;">
     <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#9a6700;">4) 삼성메디슨 UX 업무에 적용 가능한 인사이트</p>
     <ul style="margin:0;padding-left:18px;font-size:13px;color:#5b4a1f;line-height:1.8;">{ux_html}</ul>
@@ -942,7 +969,7 @@ def assemble_email(news_html: str, papers_html: str, n_news: int, n_papers: int)
   <tr>
     <td style="padding:20px 30px 24px;">
       <h2 style="margin:0 0 12px;color:#1a5276;border-bottom:2px solid #27ae60;padding-bottom:8px;">인간공학 논문 동향</h2>
-      <p style="margin:0 0 10px;font-size:12px;color:#6b7280;">논문 초록을 바탕으로 핵심 연구 주제, 주요 방법론, 핵심 결과, 그리고 삼성메디슨 UX 업무에 적용 가능한 인사이트를 구조화해 정리했습니다.</p>
+      <p style="margin:0 0 10px;font-size:12px;color:#6b7280;">논문 초록 원문과 한국어 번역을 함께 제공하고, 핵심 연구 주제·주요 연구 방법·핵심 결과·삼성메디슨 UX 업무 적용 인사이트를 구조화해 정리했습니다.</p>
       {papers_html}
     </td>
   </tr>
