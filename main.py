@@ -2,9 +2,10 @@
 """
 초음파 시장 & 인간공학 논문 다이제스트
 - 지난 24시간 기준 신뢰 가능한 출처만 수집
-- 초음파 시장 뉴스는 중복 제거 후 회사별로 정확한 문장 형태로 정리
+- 세계 주요 초음파 회사 뉴스 누락을 줄이기 위해 회사별/별칭별 Google News RSS + 전문매체 RSS + FDA를 병렬 수집
+- 같은 이슈는 중복 제거 후 회사별로 문장형으로 정리
 - 인간공학 논문은 초록 한국어 번역, 주요 연구 방법, 핵심 결과, 삼성메디슨 UX 인사이트 제공
-- GitHub Actions에서 5분 이내 실행을 목표로 외부 호출 수를 최소화
+- GitHub Actions에서 5분 이내 실행을 목표로 외부 호출 수를 제한
 """
 
 import os
@@ -21,8 +22,8 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.utils import formatdate
-from urllib.parse import quote, urlparse
+from email.utils import formatdate, parsedate_to_datetime
+from urllib.parse import quote, urlparse, parse_qs, unquote
 
 try:
     from deep_translator import GoogleTranslator
@@ -36,17 +37,16 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 PUBMED_API_KEY = os.environ.get("PUBMED_API_KEY", "")
 
 REQUEST_TIMEOUT = (4, 10)
-GEMINI_TIMEOUT = 28
-MAX_WORKERS = 6
-MAX_NEWS_PER_QUERY = 6
-MAX_NEWS_PER_COMPANY = 4
-MAX_TOTAL_NEWS = 18
+GEMINI_TIMEOUT = 25
+MAX_WORKERS = 8
+MAX_NEWS_PER_QUERY = 10
+MAX_NEWS_PER_COMPANY = 5
+MAX_TOTAL_NEWS = 32
 MAX_PAPERS = 5
 
 USER_AGENT = {
-    "User-Agent": "Mozilla/5.0 (compatible; UltrasoundErgoDigest/2.0; +https://github.com/)"
+    "User-Agent": "Mozilla/5.0 (compatible; UltrasoundErgoDigest/3.0; +https://github.com/)"
 }
-
 SESSION = requests.Session()
 SESSION.headers.update(USER_AGENT)
 
@@ -57,47 +57,18 @@ TRUSTED_SOURCES = {
     "GE HealthCare", "Philips", "Siemens Healthineers", "Samsung Medison",
     "Samsung HME America", "Canon Medical Systems", "Mindray", "FUJIFILM Sonosite",
     "FUJIFILM Healthcare", "Esaote", "Butterfly Network", "Clarius", "EchoNous",
-    "Exo", "Alpinion Medical Systems", "SonoScape"
+    "Exo", "Alpinion Medical Systems", "SonoScape", "CHISON", "VINNO", "SIUI"
 }
 
 TRUSTED_DOMAINS = {
     "auntminnie.com", "itnonline.com", "diagnosticimaging.com", "massdevice.com",
     "medtechdive.com", "medicaldevice-network.com", "medgadget.com",
-    "fda.gov", "accessdata.fda.gov", "api.fda.gov"
-}
-
-COMPANY_MAP = {
-    "Samsung Medison": ["samsung medison", "samsung hme america", "boston imaging", "neurologica"],
-    "GE HealthCare": ["ge healthcare", "bk medical", "caption health"],
-    "Philips": ["philips"],
-    "Siemens Healthineers": ["siemens healthineers"],
-    "Canon Medical": ["canon medical"],
-    "Mindray": ["mindray"],
-    "FUJIFILM / Sonosite": ["fujifilm", "sonosite"],
-    "Esaote": ["esaote"],
-    "Butterfly Network": ["butterfly network", "butterfly iq", "bfly"],
-    "Clarius": ["clarius"],
-    "EchoNous": ["echonous", "kosmos"],
-    "Exo": ["exo", "exo iris"],
-    "Alpinion": ["alpinion"],
-    "SonoScape": ["sonoscape"],
-    "기타 초음파 시장": []
-}
-
-SEARCH_QUERIES = {
-    "Samsung Medison": [
-        '"Samsung Medison" ultrasound',
-        '"Samsung Medison" OR "Samsung HME America" OR "Boston Imaging" OR "Neurologica" imaging'
-    ],
-    "GE HealthCare": ['"GE HealthCare" ultrasound OR imaging'],
-    "Philips": ['"Philips" ultrasound OR imaging healthcare'],
-    "Siemens Healthineers": ['"Siemens Healthineers" ultrasound OR imaging'],
-    "Canon Medical": ['"Canon Medical" ultrasound OR imaging'],
-    "Mindray": ['"Mindray" ultrasound'],
-    "FUJIFILM / Sonosite": ['"FUJIFILM Sonosite" OR "FUJIFILM Healthcare" ultrasound'],
-    "Esaote": ['"Esaote" ultrasound'],
-    "Portable / POCUS": ['"Butterfly Network" OR Clarius OR EchoNous OR Exo ultrasound OR POCUS'],
-    "AI / Software": ['ultrasound AI FDA OR ultrasound AI imaging company'],
+    "fda.gov", "accessdata.fda.gov", "api.fda.gov",
+    "gehealthcare.com", "philips.com", "siemens-healthineers.com",
+    "samsunghealthcare.com", "samsungmedison.com",
+    "global.medical.canon", "us.medical.canon", "medical.canon",
+    "mindray.com", "sonosite.com", "fujifilm.com", "esaote.com", "butterflynetwork.com",
+    "clarius.com", "echonous.com", "exo.inc", "alpinion.com", "sonoscape.com"
 }
 
 SPECIALIST_RSS_FEEDS = [
@@ -108,16 +79,83 @@ SPECIALIST_RSS_FEEDS = [
     ("Medical Device Network", "https://www.medicaldevice-network.com/feed/"),
 ]
 
+COMPANY_ALIASES = {
+    "Samsung Medison": ["samsung medison", "samsung hme america", "boston imaging", "neurologica"],
+    "GE HealthCare": ["ge healthcare", "bk medical", "caption health", "vivid", "logiq", "voluson"],
+    "Philips": ["philips", "epiq", "affiniti", "lumify", "compact 5000"],
+    "Siemens Healthineers": ["siemens healthineers", "acuson"],
+    "Canon Medical": ["canon medical", "aplio"],
+    "Mindray": ["mindray", "resona", "te air", "m9", "mx7"],
+    "FUJIFILM / Sonosite": ["fujifilm sonosite", "fujifilm healthcare", "sonosite", "arietta", "hitus"],
+    "Esaote": ["esaote", "mylab"],
+    "Butterfly Network": ["butterfly network", "butterfly iq", "bfly"],
+    "Clarius": ["clarius"],
+    "EchoNous": ["echonous", "kosmos"],
+    "Exo": ["exo", "exo iris"],
+    "Alpinion": ["alpinion"],
+    "SonoScape": ["sonoscape"],
+    "CHISON": ["chison"],
+    "VINNO": ["vinno"],
+    "SIUI": ["siui"],
+    "Wisonic": ["wisonic"],
+}
+COMPANY_PRIORITY = list(COMPANY_ALIASES.keys())
+
+COMPANY_SEARCH_QUERIES = {
+    "Samsung Medison": [
+        '"Samsung Medison"',
+        '"Samsung HME America" OR "Boston Imaging" OR "Neurologica"',
+        'site:medicaldevice-network.com "Samsung Medison"',
+        'site:itnonline.com "Samsung Medison" OR "Samsung HME America"',
+        'site:usa.samsunghealthcare.com "Samsung Medison" OR "Samsung HME America"'
+    ],
+    "GE HealthCare": [
+        '"GE HealthCare" ultrasound', '"GE HealthCare" imaging ultrasound',
+        'site:gehealthcare.com ultrasound', 'site:auntminnie.com "GE HealthCare" ultrasound'
+    ],
+    "Philips": [
+        'Philips ultrasound healthcare', 'Philips EPIQ OR Affiniti ultrasound',
+        'site:philips.com ultrasound healthcare', 'site:auntminnie.com Philips ultrasound'
+    ],
+    "Siemens Healthineers": [
+        '"Siemens Healthineers" ultrasound', 'ACUSON Siemens Healthineers',
+        'site:siemens-healthineers.com ultrasound', 'site:auntminnie.com "Siemens Healthineers" ultrasound'
+    ],
+    "Canon Medical": [
+        '"Canon Medical" ultrasound', 'Aplio Canon Medical ultrasound',
+        'site:medical.canon ultrasound', 'site:auntminnie.com "Canon Medical" ultrasound'
+    ],
+    "Mindray": [
+        'Mindray ultrasound', 'Mindray Resona ultrasound',
+        'site:mindray.com ultrasound', 'site:medicaldevice-network.com Mindray ultrasound'
+    ],
+    "FUJIFILM / Sonosite": [
+        '"FUJIFILM Sonosite" ultrasound', '"FUJIFILM Healthcare" ultrasound OR Arietta',
+        'site:sonosite.com ultrasound', 'site:fujifilm.com ultrasound healthcare'
+    ],
+    "Esaote": ['Esaote ultrasound', 'Esaote MyLab ultrasound'],
+    "Butterfly Network": ['"Butterfly Network" ultrasound', '"Butterfly iQ"'],
+    "Clarius": ['Clarius ultrasound', 'Clarius handheld ultrasound'],
+    "EchoNous": ['EchoNous ultrasound', 'Kosmos ultrasound'],
+    "Exo": ['Exo ultrasound', 'Exo Iris ultrasound'],
+    "Alpinion": ['Alpinion ultrasound'],
+    "SonoScape": ['SonoScape ultrasound'],
+    "CHISON": ['CHISON ultrasound'],
+    "VINNO": ['VINNO ultrasound'],
+    "SIUI": ['SIUI ultrasound'],
+    "Wisonic": ['Wisonic ultrasound'],
+}
+
 NOISE_KEYWORDS = [
     "cleaner", "cleaning", "welder", "welding", "speaker", "headphone", "humidifier",
-    "toothbrush", "pest", "rodent", "non-destructive", "consumer", "support", "customer support",
-    "news & insights", "news and insights", "global / english", "women's health", "ultrasound systems",
-    "general imaging", "product page", "contact", "about us"
+    "toothbrush", "pest", "rodent", "non-destructive", "consumer electronics", "stock price",
+    "contact us", "privacy policy", "terms of use", "careers", "job openings", "support", "service manual"
 ]
 
-IMAGING_BUSINESS_TERMS = [
-    "ultrasound", "sonography", "imaging", "medical imaging", "radiology", "diagnostic imaging",
-    "point-of-care", "pocus", "transducer", "probe", "women's health", "cardiovascular"
+IMAGING_TERMS = [
+    "ultrasound", "sonography", "echocardiography", "pocus", "point-of-care", "point of care",
+    "probe", "transducer", "medical imaging", "imaging", "diagnostic imaging", "radiology",
+    "women's health", "cardiovascular", "workflow", "fda", "510(k)", "clearance", "ai"
 ]
 
 TOPIC_MAP = {
@@ -157,9 +195,23 @@ def trim_title_suffix(title: str) -> str:
     for sep in [" - ", " | "]:
         if sep in title:
             left, right = title.rsplit(sep, 1)
-            if len(right) < 40:
+            if len(right) < 45:
                 return left.strip()
     return title
+
+
+def normalize_google_link(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        p = urlparse(url)
+        if "news.google.com" in p.netloc:
+            q = parse_qs(p.query)
+            if "url" in q:
+                return unquote(q["url"][0])
+        return url
+    except Exception:
+        return url
 
 
 def translate_ko(text: str) -> str:
@@ -169,17 +221,38 @@ def translate_ko(text: str) -> str:
     if GoogleTranslator is None:
         return text
     try:
-        return GoogleTranslator(source="auto", target="ko").translate(text[:3000])
+        return GoogleTranslator(source="auto", target="ko").translate(text[:2800])
     except Exception:
         return text
 
 
-def source_is_trusted(source: str, url: str = "") -> bool:
-    source = normalize_space(source)
-    if source and any(source.lower() == s.lower() or source.lower() in s.lower() or s.lower() in source.lower() for s in TRUSTED_SOURCES):
-        return True
-    host = urlparse(url).netloc.lower().replace("www.", "")
-    return any(host == d or host.endswith("." + d) for d in TRUSTED_DOMAINS)
+def mostly_korean(text: str) -> bool:
+    korean = len(re.findall(r"[가-힣]", text or ""))
+    latin = len(re.findall(r"[A-Za-z]", text or ""))
+    return korean >= max(8, latin)
+
+
+def ensure_korean_sentence(text: str) -> str:
+    text = normalize_space(text)
+    if not text:
+        return ""
+    if not mostly_korean(text):
+        text = translate_ko(text)
+        text = normalize_space(text)
+    if text and text[-1] not in ".!?":
+        text += "."
+    return text
+
+
+def ensure_list_korean_sentences(items, max_items=3):
+    out = []
+    for x in items or []:
+        x = ensure_korean_sentence(x)
+        if x and x not in out:
+            out.append(x)
+        if len(out) >= max_items:
+            break
+    return out
 
 
 def parse_entry_datetime(entry) -> dt.datetime | None:
@@ -190,35 +263,44 @@ def parse_entry_datetime(entry) -> dt.datetime | None:
                 return dt.datetime(*value[:6], tzinfo=dt.timezone.utc)
             except Exception:
                 pass
-    for key in ["published", "updated"]:
+    for key in ["published", "updated", "pubDate"]:
         txt = entry.get(key)
         if txt:
-            for fmt in ["%a, %d %b %Y %H:%M:%S %Z", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z"]:
-                try:
-                    parsed = dt.datetime.strptime(txt, fmt)
-                    if parsed.tzinfo is None:
-                        parsed = parsed.replace(tzinfo=dt.timezone.utc)
-                    return parsed.astimezone(dt.timezone.utc)
-                except Exception:
-                    pass
+            try:
+                parsed = parsedate_to_datetime(txt)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=dt.timezone.utc)
+                return parsed.astimezone(dt.timezone.utc)
+            except Exception:
+                pass
     return None
+
+
+def source_is_trusted(source: str, url: str = "") -> bool:
+    source = normalize_space(source)
+    if source and any(source.lower() == s.lower() or source.lower() in s.lower() or s.lower() in source.lower() for s in TRUSTED_SOURCES):
+        return True
+    host = urlparse(url).netloc.lower().replace("www.", "")
+    return any(host == d or host.endswith("." + d) for d in TRUSTED_DOMAINS)
 
 
 def infer_company(text: str) -> str:
     text = (text or "").lower()
-    for company, keys in COMPANY_MAP.items():
-        if any(k in text for k in keys):
+    for company in COMPANY_PRIORITY:
+        if any(alias in text for alias in COMPANY_ALIASES[company]):
             return company
     return "기타 초음파 시장"
 
 
 def classify_news_category(text: str) -> str:
     text = (text or "").lower()
-    if any(k in text for k in ["510(k)", "clearance", "approval", "de novo", "ce mark", "fda"]):
+    if any(k in text for k in ["fda", "510(k)", "clearance", "approval", "ce mark", "de novo"]):
         return "인허가"
-    if any(k in text for k in ["acquire", "acquisition", "merger", "partnership", "collaboration", "unify", "rebrand"]):
+    if any(k in text for k in ["partnership", "collaboration", "agreement", "contract"]):
+        return "파트너십/계약"
+    if any(k in text for k in ["acquire", "acquisition", "merger", "unify", "integration", "combine"]):
         return "사업/조직"
-    if any(k in text for k in ["launch", "launched", "introduce", "release", "platform", "system", "software"]):
+    if any(k in text for k in ["launch", "release", "introduced", "introduces", "new system", "software"]):
         return "제품/기술"
     if any(k in text for k in ["study", "clinical", "validation", "research"]):
         return "임상/연구"
@@ -226,29 +308,27 @@ def classify_news_category(text: str) -> str:
 
 
 def should_keep_news(title: str, snippet: str, source: str, url: str) -> bool:
-    title_l = (title or "").lower()
-    snippet_l = (snippet or "").lower()
-    text = f"{title_l} {snippet_l}"
+    text = f"{(title or '').lower()} {(snippet or '').lower()} {source.lower()} {url.lower()}"
     if any(noise in text for noise in NOISE_KEYWORDS):
         return False
     if not source_is_trusted(source, url):
         return False
-    company = infer_company(f"{title} {snippet} {source} {url}")
-    if company == "기타 초음파 시장" and not any(t in text for t in IMAGING_BUSINESS_TERMS):
-        return False
+    company = infer_company(text)
     if company != "기타 초음파 시장":
-        if any(term in text for term in IMAGING_BUSINESS_TERMS + ["healthcare", "medical", "hospital"]):
+        if any(term in text for term in IMAGING_TERMS + ["healthcare", "medical", "business", "unit", "division", "america", "workflow"]):
             return True
-    return any(term in text for term in ["ultrasound", "sonography", "pocus", "medical imaging", "diagnostic imaging"])
+    return any(term in text for term in ["ultrasound", "sonography", "pocus", "medical imaging", "diagnostic imaging", "transducer", "probe"])
 
 
-def canonical_news_key(title: str, company: str, date_text: str = "") -> str:
-    title = trim_title_suffix(title).lower()
+def canonical_news_key(item: dict) -> str:
+    title = trim_title_suffix(item.get("title", "")).lower()
     title = re.sub(r"[^a-z0-9가-힣]+", " ", title)
-    title = re.sub(r"\b(the|a|an|to|for|and|of|with|under|its)\b", " ", title)
+    title = re.sub(r"\b(the|a|an|to|for|and|of|with|under|its|new|us|u s)\b", " ", title)
     title = normalize_space(title)
-    date_text = normalize_space((date_text or "")[:16])
-    return f"{company}|{title}|{date_text[:10]}"
+    company = item.get("company", "")
+    host = urlparse(normalize_google_link(item.get("url", ""))).netloc.lower().replace("www.", "")
+    date_prefix = normalize_space((item.get("date", "") or "")[:10])
+    return f"{company}|{title}|{date_prefix}|{host}"
 
 
 def call_gemini_json(prompt: str) -> str:
@@ -257,11 +337,7 @@ def call_gemini_json(prompt: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": 3800,
-            "responseMimeType": "application/json"
-        }
+        "generationConfig": {"temperature": 0.15, "maxOutputTokens": 3400, "responseMimeType": "application/json"},
     }
     try:
         r = SESSION.post(url, json=payload, timeout=GEMINI_TIMEOUT)
@@ -280,34 +356,28 @@ def summarize_news_ko(item: dict) -> str:
     company = item.get("company", "")
     category = item.get("detail_category", "")
     if GEMINI_API_KEY:
-        prompt = f"""
+        prompt = f'''
 다음 의료영상 산업 뉴스 1건을 한국어 1~2문장으로 정확하게 정리하세요.
 반드시 JSON만 출력합니다.
 {{"summary":"..."}}
 규칙:
 - 기사에 없는 정보 추가 금지
 - 추측 금지
-- 문장형으로 작성
 - 회사명과 핵심 변화가 드러나야 함
-- 불필요한 수식어 금지
+- 자연스러운 완결 문장으로 작성
 제목: {title}
 회사: {company}
 분류: {category}
-출처: {item.get('source','')}
+출처: {item.get("source", "")}
 스니펫: {snippet}
-"""
+'''
         raw = call_gemini_json(prompt)
         if raw:
             try:
-                return normalize_space(json.loads(raw).get("summary", ""))
+                return ensure_korean_sentence(json.loads(raw).get("summary", ""))
             except Exception:
                 pass
-    base = snippet if snippet else title
-    base = re.sub(r"\.{3,}", ".", base)
-    base = normalize_space(base)
-    if base and not base.endswith((".", "다.", "니다.")):
-        base += "."
-    return translate_ko(base) or translate_ko(title)
+    return ensure_korean_sentence(snippet or title)
 
 
 def fetch_feed(url: str):
@@ -321,31 +391,30 @@ def fetch_google_news(query: str, label: str) -> list:
     items = []
     try:
         feed = fetch_feed(url)
-        for entry in feed.entries[:MAX_NEWS_PER_QUERY * 3]:
+        for entry in feed.entries[:MAX_NEWS_PER_QUERY * 4]:
             published = parse_entry_datetime(entry)
             if published and published < cutoff_24h():
                 continue
             source = normalize_space((entry.get("source") or {}).get("title", "Google News"))
             title = trim_title_suffix(entry.get("title", ""))
-            snippet = clean_html_text(entry.get("summary", ""))[:260]
-            link = entry.get("link", "")
+            snippet = clean_html_text(entry.get("summary", ""))[:320]
+            link = normalize_google_link(entry.get("link", ""))
             if not should_keep_news(title, snippet, source, link):
                 continue
-            company = infer_company(f"{title} {snippet} {source} {label}")
             items.append({
                 "title": title,
                 "snippet": snippet,
                 "url": link,
                 "source": source,
                 "date": published.isoformat() if published else entry.get("published", entry.get("updated", "")),
-                "company": company,
+                "company": infer_company(f"{title} {snippet} {source} {label} {link}"),
                 "detail_category": classify_news_category(f"{title} {snippet}"),
                 "trust": "trusted_publisher",
             })
             if len(items) >= MAX_NEWS_PER_QUERY:
                 break
     except Exception as e:
-        print(f"Google News 오류 [{label}]: {e}")
+        print(f"Google News 오류 [{label}] {query}: {e}")
     return items
 
 
@@ -353,23 +422,22 @@ def fetch_specialist_feed(name: str, url: str) -> list:
     items = []
     try:
         feed = fetch_feed(url)
-        for entry in feed.entries[:12]:
+        for entry in feed.entries[:20]:
             published = parse_entry_datetime(entry)
             if published and published < cutoff_24h():
                 continue
             title = trim_title_suffix(entry.get("title", ""))
-            snippet = clean_html_text(entry.get("summary", ""))[:260]
+            snippet = clean_html_text(entry.get("summary", ""))[:320]
             link = entry.get("link", "")
             if not should_keep_news(title, snippet, name, link):
                 continue
-            company = infer_company(f"{title} {snippet} {name} {link}")
             items.append({
                 "title": title,
                 "snippet": snippet,
                 "url": link,
                 "source": name,
                 "date": published.isoformat() if published else entry.get("published", entry.get("updated", "")),
-                "company": company,
+                "company": infer_company(f"{title} {snippet} {name} {link}"),
                 "detail_category": classify_news_category(f"{title} {snippet}"),
                 "trust": "trusted_specialist_media",
             })
@@ -385,7 +453,7 @@ def fetch_fda_510k() -> list:
     week_ago = today - dt.timedelta(days=7)
     url = (
         "https://api.fda.gov/device/510k.json?"
-        f"search=openfda.device_name:ultrasound+AND+decision_date:[{week_ago:%Y%m%d}+TO+{today:%Y%m%d}]&limit=8"
+        f"search=openfda.device_name:ultrasound+AND+decision_date:[{week_ago:%Y%m%d}+TO+{today:%Y%m%d}]&limit=12"
     )
     items = []
     try:
@@ -393,18 +461,15 @@ def fetch_fda_510k() -> list:
         if r.status_code != 200:
             return []
         for rec in r.json().get("results", []):
-            date_str = rec.get("decision_date", "")
             device_name = normalize_space(rec.get("device_name", "N/A"))
             applicant = normalize_space(rec.get("applicant", "N/A"))
             k_number = normalize_space(rec.get("k_number", ""))
-            title = f"FDA cleared {device_name}"
-            snippet = f"Applicant {applicant}; K-number {k_number}."
             items.append({
-                "title": title,
-                "snippet": snippet,
+                "title": f"FDA cleared {device_name}",
+                "snippet": f"Applicant {applicant}; K-number {k_number}.",
                 "url": f"https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfpmn/pmn.cfm?ID={k_number}",
                 "source": "FDA openFDA",
-                "date": date_str,
+                "date": rec.get("decision_date", ""),
                 "company": infer_company(f"{device_name} {applicant}"),
                 "detail_category": "인허가",
                 "trust": "official_regulator",
@@ -415,14 +480,31 @@ def fetch_fda_510k() -> list:
 
 
 def dedupe_news(items: list) -> list:
-    best = {}
     rank = {"official_regulator": 0, "trusted_specialist_media": 1, "trusted_publisher": 2}
+    best = {}
     for item in items:
-        key = canonical_news_key(item.get("title", ""), item.get("company", ""), item.get("date", ""))
+        key = canonical_news_key(item)
         old = best.get(key)
-        if old is None or rank.get(item.get("trust", "trusted_publisher"), 9) < rank.get(old.get("trust", "trusted_publisher"), 9):
+        if old is None:
             best[key] = item
-    result = list(best.values())
+        else:
+            old_rank = rank.get(old.get("trust", "trusted_publisher"), 9)
+            new_rank = rank.get(item.get("trust", "trusted_publisher"), 9)
+            if (new_rank, -len(item.get("snippet", ""))) < (old_rank, -len(old.get("snippet", ""))):
+                best[key] = item
+
+    grouped = {}
+    for item in best.values():
+        t = trim_title_suffix(item.get("title", "")).lower()
+        t = re.sub(r"[^a-z0-9가-힣]+", " ", t)
+        t = normalize_space(t)
+        short = " ".join(t.split()[:8])
+        key = f"{item.get('company', '')}|{short}|{(item.get('date', '') or '')[:10]}"
+        old = grouped.get(key)
+        if old is None or rank.get(item.get("trust", "trusted_publisher"), 9) < rank.get(old.get("trust", "trusted_publisher"), 9):
+            grouped[key] = item
+
+    result = list(grouped.values())
     result.sort(key=lambda x: (x.get("company", ""), x.get("date", "")), reverse=True)
     return result[:MAX_TOTAL_NEWS]
 
@@ -430,9 +512,9 @@ def dedupe_news(items: list) -> list:
 def fetch_all_news() -> list:
     tasks = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        for label, queries in SEARCH_QUERIES.items():
+        for company, queries in COMPANY_SEARCH_QUERIES.items():
             for q in queries:
-                tasks.append(ex.submit(fetch_google_news, q, label))
+                tasks.append(ex.submit(fetch_google_news, q, company))
         for name, url in SPECIALIST_RSS_FEEDS:
             tasks.append(ex.submit(fetch_specialist_feed, name, url))
         tasks.append(ex.submit(fetch_fda_510k))
@@ -447,10 +529,7 @@ def fetch_all_news() -> list:
 
 
 def fetch_pubmed_papers(query: str = "ergonomics", max_results: int = 5) -> list:
-    params = {
-        "db": "pubmed", "term": query, "datetype": "edat", "reldate": 2,
-        "retmax": max_results, "retmode": "json", "sort": "date"
-    }
+    params = {"db": "pubmed", "term": query, "datetype": "edat", "reldate": 2, "retmax": max_results, "retmode": "json", "sort": "date"}
     if PUBMED_API_KEY:
         params["api_key"] = PUBMED_API_KEY
     try:
@@ -474,10 +553,7 @@ def fetch_pubmed_papers(query: str = "ergonomics", max_results: int = 5) -> list
             abstract = normalize_space(" ".join([(a.text or "") for a in art.findall(".//AbstractText")]))[:1600]
             if not abstract:
                 continue
-            authors = [
-                normalize_space(f"{a.findtext('ForeName', '')} {a.findtext('LastName', '')}")
-                for a in art.findall(".//Author")[:6] if a.findtext("LastName")
-            ]
+            authors = [normalize_space(f"{a.findtext('ForeName', '')} {a.findtext('LastName', '')}") for a in art.findall(".//Author")[:6] if a.findtext("LastName")]
             affil_el = art.find(".//AffiliationInfo/Affiliation")
             affil = normalize_space(affil_el.text if affil_el is not None and affil_el.text else "")[:220]
             journal = normalize_space(art.findtext(".//Journal/Title", ""))
@@ -485,10 +561,7 @@ def fetch_pubmed_papers(query: str = "ergonomics", max_results: int = 5) -> list
             doi_el = art.find(".//ELocationID[@EIdType='doi']")
             doi = normalize_space(doi_el.text if doi_el is not None else "")
             pub = art.find(".//Journal/JournalIssue/PubDate")
-            pub_date = normalize_space(" ".join(filter(None, [
-                pub.findtext("Year", "") if pub is not None else "",
-                pub.findtext("Month", "") if pub is not None else "",
-            ])))
+            pub_date = normalize_space(" ".join(filter(None, [pub.findtext("Year", "") if pub is not None else "", pub.findtext("Month", "") if pub is not None else ""])))
             papers.append({
                 "title": title,
                 "authors": ", ".join(authors),
@@ -509,11 +582,7 @@ def fetch_pubmed_papers(query: str = "ergonomics", max_results: int = 5) -> list
 
 def fetch_arxiv_papers(query: str = "ergonomics", max_results: int = 1) -> list:
     try:
-        r = SESSION.get(
-            "http://export.arxiv.org/api/query",
-            params={"search_query": f"all:{query}", "start": 0, "max_results": max_results, "sortBy": "submittedDate", "sortOrder": "descending"},
-            timeout=REQUEST_TIMEOUT,
-        )
+        r = SESSION.get("http://export.arxiv.org/api/query", params={"search_query": f"all:{query}", "start": 0, "max_results": max_results, "sortBy": "submittedDate", "sortOrder": "descending"}, timeout=REQUEST_TIMEOUT)
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         root = ET.fromstring(r.content)
         papers = []
@@ -548,12 +617,7 @@ def fetch_semantic_scholar(query: str = "ergonomics workplace", max_results: int
     try:
         r = SESSION.get(
             "https://api.semanticscholar.org/graph/v1/paper/search",
-            params={
-                "query": query,
-                "fields": "title,authors,abstract,publicationDate,journal,externalIds",
-                "limit": max_results,
-                "publicationDateOrYear": f"{start_day}:{today}",
-            },
+            params={"query": query, "fields": "title,authors,abstract,publicationDate,journal,externalIds", "limit": max_results, "publicationDateOrYear": f"{start_day}:{today}"},
             timeout=REQUEST_TIMEOUT,
         )
         if r.status_code != 200:
@@ -591,113 +655,76 @@ def get_topic(paper: dict) -> str:
 
 
 def infer_method_detail(title: str, abstract: str) -> str:
-    text = normalize_space(abstract)
-    lower = text.lower()
+    abs_clean = normalize_space(abstract)
+    text = abs_clean.lower()
+    sample = ""
+    m = re.search(r"\b(n\s*=\s*\d+|\d+ participants|\d+ subjects|\d+ workers|\d+ nurses|\d+ clinicians|\d+ physicians|\d+ sonographers|\d+ radiologists)\b", text)
+    if m:
+        sample = m.group(1)
+        sample = sample.replace("participants", "명의 참가자").replace("subjects", "명의 대상자").replace("workers", "명의 작업자").replace("nurses", "명의 간호사").replace("clinicians", "명의 임상의").replace("physicians", "명의 의사").replace("sonographers", "명의 초음파 검사자").replace("radiologists", "명의 영상의학 전문의")
+        sample = sample.replace("n=", "총 ").replace("n =", "총 ")
+    metrics = []
+    metric_map = [("nasa-tlx", "NASA-TLX 작업부하"), ("emg", "근전도"), ("kinematic", "동작학"), ("usability", "사용성"), ("accuracy", "정확도"), ("sensitivity", "민감도"), ("specificity", "특이도"), ("workload", "작업부하"), ("time", "수행시간"), ("error", "오류율"), ("pain", "통증")]
+    for en, ko in metric_map:
+        if en in text:
+            metrics.append(ko)
+    metrics = list(dict.fromkeys(metrics))[:3]
 
-    def first_number_phrase(src: str) -> str:
-        patterns = [
-            r"(n\s*=\s*\d+)",
-            r"(\d+\s+(?:participants|subjects|workers|employees|patients|students|operators|clinicians|sonographers|radiologists))",
-            r"(sample of \d+)",
-        ]
-        for pat in patterns:
-            m = re.search(pat, src, flags=re.I)
-            if m:
-                return m.group(1)
-            return ""
-
-    sample = first_number_phrase(text)
-
-    if any(k in lower for k in ["systematic review", "scoping review", "meta-analysis", "narrative review", "literature review"]):
-        phrase = "문헌고찰 방식으로 최근 연구를 선별·비교해"
+    if any(k in text for k in ["systematic review", "scoping review", "meta-analysis", "literature review", "review"]):
+        return ensure_korean_sentence("선행연구를 체계적으로 검토해 주요 위험요인, 설계 변수 또는 중재 효과를 비교·종합한 문헌고찰 연구입니다")
+    if any(k in text for k in ["survey", "questionnaire", "cross-sectional"]):
+        base = "설문 또는 단면조사로 대상자의 작업 특성, 증상, 인식 변수를 수집하고 변수 간 차이를 비교했습니다"
         if sample:
-            phrase += f" ({sample})"
-        if any(k in lower for k in ["guideline", "framework", "risk factor"]):
-            phrase += " 위험요인, 관리 전략, 평가 틀을 종합했습니다."
-        else:
-            phrase += " 핵심 경향과 근거를 종합했습니다."
-        return phrase
-
-    if any(k in lower for k in ["survey", "questionnaire", "cross-sectional", "self-report"]):
-        target = "대상자"
-        if any(k in lower for k in ["nurse", "nursing"]):
-            target = "간호사"
-        elif any(k in lower for k in ["sonographer", "ultrasound"]):
-            target = "초음파 검사자"
-        elif any(k in lower for k in ["worker", "employee"]):
-            target = "근로자"
-        sent = f"설문 또는 단면조사로 {target}의 작업 특성, 증상, 인식을 수집했습니다"
+            base = f"{sample}를 대상으로 {base}"
+        if metrics:
+            base += f". 주요 지표는 {', '.join(metrics)}입니다"
+        return ensure_korean_sentence(base)
+    if any(k in text for k in ["randomized", "trial", "controlled", "experiment", "comparison"]):
+        base = "비교 조건 또는 실험군·대조군을 둔 설계로 조건 간 차이를 평가했습니다"
         if sample:
-            sent += f" ({sample})"
-        if any(k in lower for k in ["regression", "association", "correlation", "predict"]):
-            sent += ", 이후 변수 간 연관성과 영향 요인을 통계적으로 비교했습니다."
-        else:
-            sent += ", 이후 집단 간 차이 또는 빈도를 비교했습니다."
-        return sent
-
-    if any(k in lower for k in ["randomized", "controlled", "trial", "intervention"]):
-        sent = "비교군 또는 조건 차이를 둔 실험 설계로 개입 전후 또는 집단 간 결과를 평가했습니다"
+            base = f"{sample}를 대상으로 {base}"
+        if metrics:
+            base += f". 주요 측정 지표는 {', '.join(metrics)}입니다"
+        return ensure_korean_sentence(base)
+    if any(k in text for k in ["emg", "kinematic", "biomechanics", "motion", "force"]):
+        base = "동작, 힘, 근전도 등 생체역학 지표를 측정해 자세와 신체 부담을 정량 분석했습니다"
         if sample:
-            sent += f" ({sample})"
-        if any(k in lower for k in ["workload", "usability", "performance", "fatigue"]):
-            sent += ", 작업부하·사용성·수행 성과 같은 핵심 지표를 측정했습니다."
-        else:
-            sent += ", 주요 결과 지표를 비교해 개입 효과를 검증했습니다."
-        return sent
-
-    if any(k in lower for k in ["emg", "kinematic", "biomechanics", "motion", "force", "posture"]):
-        sent = "실험 또는 관찰 환경에서 자세, 동작, 근활성도, 힘과 같은 생체역학 지표를 측정했습니다"
+            base = f"{sample}를 대상으로 {base}"
+        if metrics:
+            base += f". 주요 지표는 {', '.join(metrics)}입니다"
+        return ensure_korean_sentence(base)
+    if any(k in text for k in ["interview", "qualitative", "focus group", "ethnography"]):
+        base = "인터뷰, 관찰 또는 정성 분석으로 사용 경험과 문제 상황의 패턴을 도출했습니다"
         if sample:
-            sent += f" ({sample})"
-        sent += ", 이를 통해 조건별 신체 부담 차이를 정량 비교했습니다."
-        return sent
-
-    if any(k in lower for k in ["interview", "focus group", "qualitative", "thematic analysis"]):
-        sent = "인터뷰·관찰 또는 포커스그룹으로 사용 경험과 문제 상황을 수집했습니다"
-        if sample:
-            sent += f" ({sample})"
-        sent += ", 이후 반복적으로 등장하는 주제와 패턴을 정리했습니다."
-        return sent
-
-    if any(k in lower for k in ["machine learning", "deep learning", "algorithm", "model", "classifier"]):
-        sent = "데이터셋에 알고리즘 또는 모델을 적용해 예측·분류 성능을 평가했습니다"
-        if sample:
-            sent += f" ({sample})"
-        if any(k in lower for k in ["accuracy", "auc", "sensitivity", "specificity", "f1"]):
-            sent += ", 정확도·민감도·AUC 등 성능 지표를 비교했습니다."
-        else:
-            sent += ", 기존 방법과 성능 차이를 비교했습니다."
-        return sent
-
-    first = re.split(r"(?<=[.!?])\s+", text)[:2]
-    compact = " ".join(first)
-    compact = re.sub(r"\s+", " ", compact).strip()
-    if len(compact) > 210:
-        compact = compact[:207] + "..."
-    return compact or "초록에 제시된 연구 대상, 비교 조건, 측정 지표를 바탕으로 핵심 설계를 요약했습니다."
+            base = f"{sample}를 대상으로 {base}"
+        return ensure_korean_sentence(base)
+    if any(k in text for k in ["machine learning", "deep learning", "algorithm", "classification", "prediction", "model"]):
+        base = "데이터 기반 모델 또는 알고리즘을 학습·평가해 예측 또는 분류 성능을 비교했습니다"
+        if metrics:
+            base += f". 주요 지표는 {', '.join(metrics)}입니다"
+        return ensure_korean_sentence(base)
+    first = re.split(r"(?<=[.!?])\s+", abs_clean)[0][:220]
+    return ensure_korean_sentence(first) if first else "초록에 제시된 연구 대상, 비교 조건, 측정 지표를 바탕으로 핵심 연구 설계를 정리했습니다."
 
 
 def fallback_paper_summary(topic: str, paper: dict) -> dict:
     abstract = normalize_space(paper.get("abstract", ""))
     text = abstract.lower()
-    method = infer_method_detail(paper.get("title", ""), abstract)
-
     if any(k in text for k in ["significant", "reduced", "improved", "lower"]):
         result = "비교한 조건 또는 개입에 따라 작업부하, 수행 효율, 사용성 중 일부 지표가 유의하게 개선됐습니다."
     elif any(k in text for k in ["risk", "pain", "fatigue", "burden"]):
-        result = "작업부하·피로·통증 또는 위험 노출과 연관된 핵심 요인이 결과 변수로 제시됐습니다."
+        result = "작업부하, 피로, 통증 또는 위험 노출과 연관된 핵심 요인이 결과 변수로 제시됐습니다."
     else:
         result = "초록은 비교 결과와 주요 변수의 방향성을 제시하며, 실무에 참고할 차이점을 보여줍니다."
-
     ux = [
-        "초음파 검사 워크플로우에서 반복 입력과 화면 전환을 줄이는 방향으로 메뉴 구조를 단순화할 근거로 활용할 수 있습니다.",
-        "측정·주석·저장 단계처럼 사용자의 인지부하가 큰 구간에 대해 정보 우선순위와 피드백 방식을 재설계하는 데 참고할 수 있습니다.",
-        "프로브 조작과 화면 조작이 동시에 발생하는 상황을 고려해 한 손 조작, 빠른 복귀, 자동 상태 유지 같은 UX 원칙을 강화할 수 있습니다.",
+        "초음파 검사 워크플로우에서 반복 입력과 화면 전환을 줄이는 방향으로 메뉴 구조를 단순화하는 데 참고할 수 있습니다.",
+        "측정, 주석, 저장 단계처럼 인지부하가 큰 구간에 대해 정보 우선순위와 피드백 방식을 재설계하는 근거로 활용할 수 있습니다.",
+        "프로브 조작과 화면 조작이 동시에 일어나는 상황을 고려해 한 손 조작, 빠른 복귀, 자동 상태 유지 같은 UX 원칙을 강화할 수 있습니다.",
     ]
     return {
-        "ko_abstract": translate_ko(abstract[:2000]),
-        "research_method": method,
-        "key_result": result,
+        "ko_abstract": ensure_korean_sentence(translate_ko(abstract[:2000])),
+        "research_method": infer_method_detail(paper.get("title", ""), abstract),
+        "key_result": ensure_korean_sentence(result),
         "ux_insights": ux[:3],
     }
 
@@ -707,29 +734,21 @@ def enrich_papers(papers: list) -> list:
         return []
     compact = []
     for i, p in enumerate(papers, 1):
-        compact.append({
-            "id": i,
-            "title": p.get("title", ""),
-            "topic": get_topic(p),
-            "authors": p.get("authors", ""),
-            "journal": p.get("journal", ""),
-            "pub_date": p.get("pub_date", ""),
-            "abstract": p.get("abstract", "")[:1600],
-        })
+        compact.append({"id": i, "title": p.get("title", ""), "topic": get_topic(p), "authors": p.get("authors", ""), "journal": p.get("journal", ""), "pub_date": p.get("pub_date", ""), "abstract": p.get("abstract", "")[:1600]})
 
-    prompt = f"""
+    prompt = f'''
 당신은 인간공학 논문을 정리하는 한국어 연구 편집자입니다.
 반드시 JSON 배열만 출력하세요.
 각 논문마다 다음 필드를 포함하세요: id, ko_title, ko_abstract, research_method, key_result, ux_insights
 규칙:
 - ko_title: 자연스러운 한국어 제목
 - ko_abstract: 초록의 정확한 한국어 번역
-- research_method: 결과를 도출하기 위한 주요 연구 방법을 1~3문장으로 요약. 연구 대상, 비교 조건, 측정 지표·분석 방식이 드러나야 하며, 이 항목만 읽어도 어떤 방법을 썼는지 이해되어야 함
-- key_result: 핵심 결과를 1~2문장으로 정리
-- ux_insights: 삼성메디슨 UX 업무 적용 인사이트 3개 배열. 초음파 UI, 검사 워크플로우, 자동 측정/판독 보조, 정보 구조, 버튼/터치 조작, 인지부하, 작업부하 감소와 연결
+- research_method: 반드시 한국어 1~3문장. 연구 대상, 비교 조건/실험 설계, 측정 지표 중 확인 가능한 내용을 포함하고 완결 문장으로 작성
+- key_result: 반드시 한국어 1~2문장. 완결 문장으로 작성
+- ux_insights: 삼성메디슨 UX 업무 적용 인사이트 3개 배열. 반드시 한국어 완결 문장
 - 과장 금지, 초록에 없는 내용 금지
 입력: {json.dumps(compact, ensure_ascii=False)}
-"""
+'''
     parsed = {}
     raw = call_gemini_json(prompt)
     if raw:
@@ -742,24 +761,24 @@ def enrich_papers(papers: list) -> list:
     for i, p in enumerate(papers, 1):
         fb = fallback_paper_summary(get_topic(p), p)
         row = parsed.get(i, {})
+        method = normalize_space(row.get("research_method", "")) or fb["research_method"]
+        key_result = normalize_space(row.get("key_result", "")) or fb["key_result"]
+        ux_src = row.get("ux_insights", fb["ux_insights"])
+        ko_title = normalize_space(row.get("ko_title", "")) or translate_ko(p.get("title", ""))
         out.append({
             **p,
             "topic": get_topic(p),
-            "ko_title": normalize_space(row.get("ko_title", "")) or translate_ko(p.get("title", "")),
-            "ko_abstract": normalize_space(row.get("ko_abstract", "")) or fb["ko_abstract"],
-            "research_method": normalize_space(row.get("research_method", "")) or fb["research_method"],
-            "key_result": normalize_space(row.get("key_result", "")) or fb["key_result"],
-            "ux_insights": [normalize_space(x) for x in row.get("ux_insights", fb["ux_insights"]) if normalize_space(x)][:3],
+            "ko_title": ensure_korean_sentence(ko_title),
+            "ko_abstract": ensure_korean_sentence(normalize_space(row.get("ko_abstract", "")) or fb["ko_abstract"]),
+            "research_method": ensure_korean_sentence(method),
+            "key_result": ensure_korean_sentence(key_result),
+            "ux_insights": ensure_list_korean_sentences(ux_src, max_items=3),
         })
     return out
 
 
 def collect_papers() -> list:
-    tasks = [
-        (fetch_pubmed_papers, ("ergonomics", MAX_PAPERS)),
-        (fetch_arxiv_papers, ("ergonomics", 1)),
-        (fetch_semantic_scholar, ("ergonomics workplace", 1)),
-    ]
+    tasks = [(fetch_pubmed_papers, ("ergonomics", MAX_PAPERS)), (fetch_arxiv_papers, ("ergonomics", 1)), (fetch_semantic_scholar, ("ergonomics workplace", 1))]
     papers = []
     with ThreadPoolExecutor(max_workers=3) as ex:
         futs = [ex.submit(func, *args) for func, args in tasks]
@@ -797,9 +816,9 @@ def build_news_html(news_items: list) -> str:
             date_text = item.get("date", "")[:16].replace("T", " ")
             blocks.append(
                 f'''<div style="background:#f8f9fa;border-left:4px solid #2e86c1;padding:12px 16px;margin:4px 0 4px 16px;">
-  <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#2e86c1;">{safe_html(item.get('detail_category','시장/경영'))}</p>
-  <h4 style="margin:0 0 6px;font-size:14px;"><a href="{safe_html(item.get('url',''))}" style="color:#1a5276;text-decoration:none;">{safe_html(trim_title_suffix(item.get('title','')))}</a></h4>
-  <p style="font-size:11px;color:#777;margin:0 0 8px;">{safe_html(date_text)} · {safe_html(item.get('source',''))}</p>
+  <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#2e86c1;">{safe_html(item.get('detail_category', '시장/경영'))}</p>
+  <h4 style="margin:0 0 6px;font-size:14px;"><a href="{safe_html(item.get('url', ''))}" style="color:#1a5276;text-decoration:none;">{safe_html(trim_title_suffix(item.get('title', '')))}</a></h4>
+  <p style="font-size:11px;color:#777;margin:0 0 8px;">{safe_html(date_text)} · {safe_html(item.get('source', ''))}</p>
   <p style="font-size:13px;color:#333;line-height:1.7;margin:0;">{safe_html(summary)}</p>
 </div>'''
             )
@@ -822,14 +841,14 @@ def build_papers_html(papers: list) -> str:
         ux_html = "".join([f'<li style="margin:0 0 6px;">{safe_html(x)}</li>' for x in p.get("ux_insights", [])])
         blocks.append(
             f'''<div style="background:#f8f9fa;border-left:4px solid #27ae60;padding:14px 16px;margin:12px 0;">
-  <p style="font-size:11px;color:#27ae60;font-weight:bold;margin:0 0 4px;">{safe_html(p.get('topic','기타'))}</p>
-  <h4 style="margin:0 0 4px;font-size:15px;color:#1a5276;">{safe_html(p.get('title',''))}</h4>
-  <p style="font-size:14px;color:#2c3e50;margin:2px 0 8px;">{safe_html(p.get('ko_title',''))}</p>
-  <p style="font-size:12px;color:#777;margin:4px 0 8px;line-height:1.8;">{safe_html(p.get('authors',''))}<br/>{safe_html(p.get('affiliations','') or '소속 정보 없음')}<br/>{safe_html(p.get('journal',''))} · {safe_html(p.get('pub_date',''))} · {safe_html(p.get('evidence',''))}{' · <a href="' + link + '" style="color:#2e86c1;">원문 보기</a>' if link else ''}</p>
+  <p style="font-size:11px;color:#27ae60;font-weight:bold;margin:0 0 4px;">{safe_html(p.get('topic', '기타'))}</p>
+  <h4 style="margin:0 0 4px;font-size:15px;color:#1a5276;">{safe_html(p.get('title', ''))}</h4>
+  <p style="font-size:14px;color:#2c3e50;margin:2px 0 8px;">{safe_html(p.get('ko_title', ''))}</p>
+  <p style="font-size:12px;color:#777;margin:4px 0 8px;line-height:1.8;">{safe_html(p.get('authors', ''))}<br/>{safe_html(p.get('affiliations', '') or '소속 정보 없음')}<br/>{safe_html(p.get('journal', ''))} · {safe_html(p.get('pub_date', ''))} · {safe_html(p.get('evidence', ''))}{' · <a href="' + link + '" style="color:#2e86c1;">원문 보기</a>' if link else ''}</p>
   <p style="font-size:13px;color:#333;line-height:1.7;"><strong>Abstract:</strong> {safe_html(abstract_en)}</p>
   <div style="background:#fdf7ea;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;"><p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#9a6700;">(1) 초록의 한국어 번역</p><p style="margin:0;font-size:13px;color:#5b4a1f;">{safe_html(abstract_ko)}</p></div>
-  <div style="background:#eef6fb;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;"><p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1a5276;">(2) 주요 연구 방법</p><p style="margin:0;font-size:13px;color:#34495e;">{safe_html(p.get('research_method',''))}</p></div>
-  <div style="background:#eaf7ee;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;"><p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1f6f43;">(3) 핵심 연구 결과</p><p style="margin:0;font-size:13px;color:#2f4f3e;">{safe_html(p.get('key_result',''))}</p></div>
+  <div style="background:#eef6fb;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;"><p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1a5276;">(2) 주요 연구 방법</p><p style="margin:0;font-size:13px;color:#34495e;">{safe_html(p.get('research_method', ''))}</p></div>
+  <div style="background:#eaf7ee;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;"><p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1f6f43;">(3) 핵심 연구 결과</p><p style="margin:0;font-size:13px;color:#2f4f3e;">{safe_html(p.get('key_result', ''))}</p></div>
   <div style="background:#fff7e8;border:1px solid #f4d08b;padding:10px 12px;border-radius:4px;margin-top:10px;"><p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#9a6700;">(4) 삼성메디슨 UX 업무에 적용 가능한 인사이트</p><ul style="margin:0;padding-left:18px;font-size:13px;color:#5b4a1f;line-height:1.8;">{ux_html}</ul></div>
 </div>'''
         )
@@ -848,10 +867,10 @@ def assemble_email(news_html: str, papers_html: str, n_news: int, n_papers: int)
 <td width="50%" style="text-align:center;padding:12px;"><p style="margin:0;font-size:28px;color:#2e86c1;font-weight:bold;">{n_news}</p><p style="margin:4px 0 0;font-size:12px;color:#555;">시장 뉴스</p></td>
 <td width="50%" style="text-align:center;padding:12px;"><p style="margin:0;font-size:28px;color:#27ae60;font-weight:bold;">{n_papers}</p><p style="margin:4px 0 0;font-size:12px;color:#555;">연구 논문</p></td>
 </tr></table></td></tr>
-<tr><td style="padding:20px 30px 8px;"><h2 style="margin:0 0 12px;color:#1a5276;border-bottom:2px solid #2e86c1;padding-bottom:8px;">지난 24시간 세계 초음파 시장 동향</h2><p style="margin:0 0 10px;font-size:12px;color:#6b7280;">신뢰 가능한 전문매체·규제기관 기준으로 확인된 기사만 포함했으며, 같은 이슈는 1건으로 묶어 중복을 제거했습니다.</p>{news_html}</td></tr>
+<tr><td style="padding:20px 30px 8px;"><h2 style="margin:0 0 12px;color:#1a5276;border-bottom:2px solid #2e86c1;padding-bottom:8px;">지난 24시간 세계 주요 초음파 회사 동향</h2><p style="margin:0 0 10px;font-size:12px;color:#6b7280;">주요 초음파 회사별 Google News RSS, 전문매체 RSS, FDA 공개 데이터를 병렬 수집해 중복을 제거했습니다. 다만 웹 검색 구조상 100% 누락 방지는 보장할 수 없어, 중요 의사결정 전에는 각 회사 공식 발표를 추가 확인하는 것이 적절합니다.</p>{news_html}</td></tr>
 <tr><td style="padding:0 30px;"><hr style="border:none;border-top:1px solid #e8eef5;"/></td></tr>
-<tr><td style="padding:20px 30px 24px;"><h2 style="margin:0 0 12px;color:#1a5276;border-bottom:2px solid #27ae60;padding-bottom:8px;">지난 24시간 인간공학 논문 동향</h2><p style="margin:0 0 10px;font-size:12px;color:#6b7280;">논문 초록을 기준으로 번역, 연구 방법, 핵심 결과, 삼성메디슨 UX 적용 인사이트를 구조화해 정리했습니다.</p>{papers_html}</td></tr>
-<tr><td style="background:#2c3e50;padding:18px 30px;color:#bdc3c7;font-size:11px;line-height:1.7;"><p style="margin:0;">중요 의사결정 전에는 기사 원문과 논문 원문을 다시 확인하는 것이 적절합니다.</p><p style="margin:4px 0 0;">News sources: Google News RSS, specialist media RSS, FDA openFDA</p><p style="margin:4px 0 0;">Paper sources: PubMed, arXiv, Semantic Scholar</p></td></tr>
+<tr><td style="padding:20px 30px 24px;"><h2 style="margin:0 0 12px;color:#1a5276;border-bottom:2px solid #27ae60;padding-bottom:8px;">지난 24시간 인간공학 논문 동향</h2><p style="margin:0 0 10px;font-size:12px;color:#6b7280;">논문 초록을 기준으로 번역, 주요 연구 방법, 핵심 결과, 삼성메디슨 UX 적용 인사이트를 구조화해 정리했습니다.</p>{papers_html}</td></tr>
+<tr><td style="background:#2c3e50;padding:18px 30px;color:#bdc3c7;font-size:11px;line-height:1.7;"><p style="margin:0;">중요 의사결정 전에는 기사 원문과 논문 원문을 다시 확인하는 것이 적절합니다.</p><p style="margin:4px 0 0;">News sources: company-specific Google News RSS, specialist media RSS, FDA openFDA</p><p style="margin:4px 0 0;">Paper sources: PubMed, arXiv, Semantic Scholar</p></td></tr>
 </table></td></tr></table></body></html>'''
 
 
