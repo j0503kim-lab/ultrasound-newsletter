@@ -590,19 +590,97 @@ def get_topic(paper: dict) -> str:
     return "기타"
 
 
+def infer_method_detail(title: str, abstract: str) -> str:
+    text = normalize_space(abstract)
+    lower = text.lower()
+
+    def first_number_phrase(src: str) -> str:
+        patterns = [
+            r"(n\s*=\s*\d+)",
+            r"(\d+\s+(?:participants|subjects|workers|employees|patients|students|operators|clinicians|sonographers|radiologists))",
+            r"(sample of \d+)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, src, flags=re.I)
+            if m:
+                return m.group(1)
+            return ""
+
+    sample = first_number_phrase(text)
+
+    if any(k in lower for k in ["systematic review", "scoping review", "meta-analysis", "narrative review", "literature review"]):
+        phrase = "문헌고찰 방식으로 최근 연구를 선별·비교해"
+        if sample:
+            phrase += f" ({sample})"
+        if any(k in lower for k in ["guideline", "framework", "risk factor"]):
+            phrase += " 위험요인, 관리 전략, 평가 틀을 종합했습니다."
+        else:
+            phrase += " 핵심 경향과 근거를 종합했습니다."
+        return phrase
+
+    if any(k in lower for k in ["survey", "questionnaire", "cross-sectional", "self-report"]):
+        target = "대상자"
+        if any(k in lower for k in ["nurse", "nursing"]):
+            target = "간호사"
+        elif any(k in lower for k in ["sonographer", "ultrasound"]):
+            target = "초음파 검사자"
+        elif any(k in lower for k in ["worker", "employee"]):
+            target = "근로자"
+        sent = f"설문 또는 단면조사로 {target}의 작업 특성, 증상, 인식을 수집했습니다"
+        if sample:
+            sent += f" ({sample})"
+        if any(k in lower for k in ["regression", "association", "correlation", "predict"]):
+            sent += ", 이후 변수 간 연관성과 영향 요인을 통계적으로 비교했습니다."
+        else:
+            sent += ", 이후 집단 간 차이 또는 빈도를 비교했습니다."
+        return sent
+
+    if any(k in lower for k in ["randomized", "controlled", "trial", "intervention"]):
+        sent = "비교군 또는 조건 차이를 둔 실험 설계로 개입 전후 또는 집단 간 결과를 평가했습니다"
+        if sample:
+            sent += f" ({sample})"
+        if any(k in lower for k in ["workload", "usability", "performance", "fatigue"]):
+            sent += ", 작업부하·사용성·수행 성과 같은 핵심 지표를 측정했습니다."
+        else:
+            sent += ", 주요 결과 지표를 비교해 개입 효과를 검증했습니다."
+        return sent
+
+    if any(k in lower for k in ["emg", "kinematic", "biomechanics", "motion", "force", "posture"]):
+        sent = "실험 또는 관찰 환경에서 자세, 동작, 근활성도, 힘과 같은 생체역학 지표를 측정했습니다"
+        if sample:
+            sent += f" ({sample})"
+        sent += ", 이를 통해 조건별 신체 부담 차이를 정량 비교했습니다."
+        return sent
+
+    if any(k in lower for k in ["interview", "focus group", "qualitative", "thematic analysis"]):
+        sent = "인터뷰·관찰 또는 포커스그룹으로 사용 경험과 문제 상황을 수집했습니다"
+        if sample:
+            sent += f" ({sample})"
+        sent += ", 이후 반복적으로 등장하는 주제와 패턴을 정리했습니다."
+        return sent
+
+    if any(k in lower for k in ["machine learning", "deep learning", "algorithm", "model", "classifier"]):
+        sent = "데이터셋에 알고리즘 또는 모델을 적용해 예측·분류 성능을 평가했습니다"
+        if sample:
+            sent += f" ({sample})"
+        if any(k in lower for k in ["accuracy", "auc", "sensitivity", "specificity", "f1"]):
+            sent += ", 정확도·민감도·AUC 등 성능 지표를 비교했습니다."
+        else:
+            sent += ", 기존 방법과 성능 차이를 비교했습니다."
+        return sent
+
+    first = re.split(r"(?<=[.!?])\s+", text)[:2]
+    compact = " ".join(first)
+    compact = re.sub(r"\s+", " ", compact).strip()
+    if len(compact) > 210:
+        compact = compact[:207] + "..."
+    return compact or "초록에 제시된 연구 대상, 비교 조건, 측정 지표를 바탕으로 핵심 설계를 요약했습니다."
+
+
 def fallback_paper_summary(topic: str, paper: dict) -> dict:
     abstract = normalize_space(paper.get("abstract", ""))
     text = abstract.lower()
-    if any(k in text for k in ["review", "systematic review", "meta-analysis", "narrative review"]):
-        method = "기존 연구를 검토·통합해 주요 위험요인과 관리 방향을 정리한 문헌고찰 연구입니다."
-    elif any(k in text for k in ["survey", "questionnaire", "cross-sectional"]):
-        method = "설문 또는 단면조사로 대상자의 작업 특성·증상·인식을 수집하고 변수 간 차이를 비교했습니다."
-    elif any(k in text for k in ["randomized", "trial", "controlled"]):
-        method = "비교군 또는 조건 차이를 둔 실험 설계로 개입 전후 또는 집단 간 결과 차이를 평가했습니다."
-    elif any(k in text for k in ["emg", "kinematic", "biomechanics", "motion"]):
-        method = "동작·근활성도·힘 등의 지표를 측정해 자세와 신체 부담을 정량 분석했습니다."
-    else:
-        method = "초록에 제시된 대상, 비교 조건, 측정 지표를 기준으로 핵심 실험 설계를 간단히 정리했습니다."
+    method = infer_method_detail(paper.get("title", ""), abstract)
 
     if any(k in text for k in ["significant", "reduced", "improved", "lower"]):
         result = "비교한 조건 또는 개입에 따라 작업부하, 수행 효율, 사용성 중 일부 지표가 유의하게 개선됐습니다."
@@ -646,7 +724,7 @@ def enrich_papers(papers: list) -> list:
 규칙:
 - ko_title: 자연스러운 한국어 제목
 - ko_abstract: 초록의 정확한 한국어 번역
-- research_method: 결과를 도출하기 위한 주요 연구 방법을 1~2문장으로 요약. 실험 설계, 비교 조건, 대상, 측정 방식이 드러나야 하며 2줄을 넘기지 않음
+- research_method: 결과를 도출하기 위한 주요 연구 방법을 1~3문장으로 요약. 연구 대상, 비교 조건, 측정 지표·분석 방식이 드러나야 하며, 이 항목만 읽어도 어떤 방법을 썼는지 이해되어야 함
 - key_result: 핵심 결과를 1~2문장으로 정리
 - ux_insights: 삼성메디슨 UX 업무 적용 인사이트 3개 배열. 초음파 UI, 검사 워크플로우, 자동 측정/판독 보조, 정보 구조, 버튼/터치 조작, 인지부하, 작업부하 감소와 연결
 - 과장 금지, 초록에 없는 내용 금지
