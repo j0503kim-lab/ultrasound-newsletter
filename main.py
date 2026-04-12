@@ -5,6 +5,7 @@
 - 중복 이슈 제거 및 회사별 그룹핑
 - 기사별 영문 1줄 요약 + 한국어 1줄 요약 제공
 - 인간공학 논문: 초록 한국어 번역 / 주요 연구 방법 / 핵심 연구 결과 / 삼성메디슨 UX 인사이트 제공
+- 담당 기능 연관 경쟁사 소식 자동 분류 섹션 추가
 - GitHub Actions 5분 내 실행 지향
 """
 
@@ -55,15 +56,12 @@ SESSION.headers.update(USER_AGENT)
 
 # ── 신뢰 가능한 뉴스 출처 ────────────────────────────────────
 TRUSTED_SOURCES = {
-    # company / official style names that can appear in Google News source field
     "GE HealthCare", "Philips", "Siemens Healthineers", "Samsung Medison", "Samsung Healthcare",
     "Canon Medical Systems", "Mindray", "FUJIFILM Healthcare", "FUJIFILM Sonosite", "Sonosite",
     "Esaote", "Butterfly Network", "Exo", "Clarius", "EchoNous", "Healcerion",
     "Alpinion", "SonoScape", "CHISON", "VINNO", "SIUI", "Wisonic", "Edan", "Landwind Medical",
-    # specialist / trade media
     "AuntMinnie", "Imaging Technology News", "ITN", "MassDevice", "MedTech Dive",
     "Medical Device Network", "Diagnostic Imaging", "Medgadget", "Healthcare-in-Europe",
-    # regulators
     "FDA", "U.S. Food and Drug Administration", "openFDA",
 }
 
@@ -74,7 +72,6 @@ SPECIALIST_RSS_FEEDS = [
     ("Medical Device Network", "https://www.medicaldevice-network.com/feed/"),
 ]
 
-# 주요 회사별 검색 질의. Google News RSS에서 회사+초음파/의료영상 문맥을 함께 잡는다.
 COMPANY_QUERIES = {
     "GE HealthCare": '"GE HealthCare" (ultrasound OR BK Medical OR Voluson OR LOGIQ OR Vscan OR imaging)',
     "Philips": 'Philips (ultrasound OR EPIQ OR Affiniti OR Compact OR imaging)',
@@ -109,7 +106,6 @@ NOISE_KEYWORDS = [
     "audio", "speaker", "toothbrush", "humidifier", "sensor", "flow meter", "beauty device",
 ]
 
-# 기사와 회사 매핑용 별칭
 COMPANY_ALIASES = {
     "GE HealthCare": ["ge healthcare", "bk medical", "voluson", "logiq", "vscan"],
     "Philips": ["philips", "epiq", "affiniti"],
@@ -143,6 +139,25 @@ TOPIC_MAP = {
     "역학·설문": ["survey", "cross-sectional", "cohort", "prevalence", "questionnaire"],
     "AI·기술": ["machine learning", "deep learning", "algorithm", "ai", "computer vision"],
 }
+
+# ── 담당 기능 연관성 분류 ─────────────────────────────────────
+MY_FEATURES = {
+    "VTIAssist":  ["VTI", "velocity time integral", "stroke volume", "doppler flow"],
+    "IVCAssist":  ["IVC", "inferior vena cava", "fluid responsiveness"],
+    "LiveEF":     ["ejection fraction", "auto EF", "LV function", "cardiac function AI"],
+    "LungAssist": ["lung ultrasound", "B-line", "pleural", "lung AI"],
+    "Measure":    ["auto measurement", "automated caliper", "measurement AI"],
+    "Report":     ["structured report", "auto report", "reporting AI"],
+    "S-hub":      ["remote ultrasound", "cloud ultrasound", "tele-ultrasound"],
+    "무선프로브":  ["wireless probe", "wireless ultrasound", "handheld ultrasound"],
+}
+
+
+def classify_feature(text: str) -> str:
+    tl = text.lower()
+    matched = [f for f, kws in MY_FEATURES.items()
+               if any(k.lower() in tl for k in kws)]
+    return ", ".join(matched) if matched else ""
 
 
 def now_utc() -> dt.datetime:
@@ -409,7 +424,6 @@ def fetch_fda_510k() -> list:
             applicant = normalize_space(rec.get("applicant", "N/A"))
             k_number = normalize_space(rec.get("k_number", ""))
             decision_date = normalize_space(rec.get("decision_date", ""))
-            # 24시간 규칙에 맞지 않으면 제외
             try:
                 d = dt.datetime.strptime(decision_date, "%Y%m%d").replace(tzinfo=dt.timezone.utc)
                 if d < cutoff_24h():
@@ -448,7 +462,6 @@ def dedupe_news(items: list) -> list:
         if new_score < cur_score:
             best[key] = item
 
-    # 유사 제목 중복 2차 제거
     grouped = defaultdict(list)
     for item in best.values():
         grouped[item.get("company", "기타 초음파 동향")].append(item)
@@ -471,9 +484,9 @@ def build_one_line_summary(item: dict) -> dict:
     title = trim_title_suffix(item.get("title", ""))
     snippet = clean_html_text(item.get("snippet", ""))
     source = item.get("source", "")
+    # ── 개선된 번역 프롬프트 ──────────────────────────────────
     prompt = f"""
-다음 기사 1건을 사실 범위를 벗어나지 않고 한 줄로만 요약하세요.
-반드시 JSON만 출력합니다.
+다음 기사 1건을 한 줄로 요약하세요. 반드시 JSON만 출력합니다.
 {{
   "en_one_line": "...",
   "ko_one_line": "..."
@@ -482,8 +495,9 @@ def build_one_line_summary(item: dict) -> dict:
 - 기사 핵심 내용만 1문장으로 요약
 - 영어 1문장, 한국어 1문장
 - 과장, 추측, 평가 표현 금지
-- 한국어는 자연스럽고 매끄러운 문장으로 작성
 - 제목과 스니펫에 없는 내용 추가 금지
+- 한국어 문체 규칙: 신문 기사가 아닌 동료에게 말하듯 자연스럽게 작성. "~했습니다" 체로 통일. 영어 원문을 직역하지 말고 한국인이 바로 이해할 수 있는 표현으로 의역. 회사명·제품명은 원어 유지.
+- 나쁜 예: "플랫폼은 AI 기반 진단 도구의 새로운 통합을 발표했습니다" → 좋은 예: "GE HealthCare가 AI 진단 기능을 새 초음파 플랫폼에 탑재한다고 밝혔습니다"
 
 제목: {title}
 출처: {source}
@@ -527,7 +541,6 @@ def fetch_all_ultrasound_news() -> list:
                 print(f"뉴스 수집 작업 오류: {e}")
 
     items = dedupe_news(items)
-    # 기사별 1줄 요약 생성
     for item in items:
         summary = build_one_line_summary(item)
         item["one_line_en"] = summary["en"]
@@ -714,36 +727,36 @@ def infer_method_detail(title: str, abstract: str) -> str:
     sample = extract_sample_info(abstract)
 
     if any(k in text for k in ["systematic review", "scoping review", "narrative review", "review", "meta-analysis"]):
-        line = "문헌고찰 설계로 관련 선행연구를 선별·검토해 핵심 주제와 설계 요소를 비교했습니다."
+        line = "여러 선행 연구를 체계적으로 검토해 핵심 주제와 설계 요소를 비교했습니다."
         if sample:
-            line = f"문헌고찰 설계로 관련 연구를 선별·검토했으며, {sample} 수준의 개별 표본이 아니라 연구 논문들을 비교 대상으로 삼았습니다."
+            line = f"여러 선행 연구를 체계적으로 검토했으며, 개별 참가자가 아닌 연구 논문들을 비교 대상으로 삼았습니다."
         return line
     if any(k in text for k in ["cross-sectional", "survey", "questionnaire"]):
-        base = "단면 설문연구로 참가자의 작업 특성, 증상 또는 인식 변수를 수집해 집단 간 차이와 관련 요인을 분석했습니다."
+        base = "참가자를 대상으로 설문조사를 진행해 작업 특성, 증상, 인식 차이를 분석했습니다."
         if sample:
-            base = f"단면 설문연구로 {sample}의 응답을 수집하고, 작업 특성·증상·인식 지표의 차이와 관련 요인을 분석했습니다."
+            base = f"{sample}을 대상으로 설문조사를 진행해 작업 특성·증상·인식 차이를 분석했습니다."
         return base
     if any(k in text for k in ["randomized", "controlled", "trial", "experiment"]):
-        base = "비교 실험 또는 시험 설계로 두 개 이상의 조건을 나누어 수행했고, 성능·오류·작업부하 지표를 비교했습니다."
+        base = "두 가지 이상의 조건을 비교하는 실험을 진행해 수행 성능, 오류율, 작업 부담을 평가했습니다."
         if sample:
-            base = f"비교 실험 또는 시험 설계로 {sample}을 조건별로 비교했고, 수행 성능·오류·작업부하 지표를 평가했습니다."
+            base = f"{sample}을 두 조건으로 나눠 실험을 진행했고, 수행 성능·오류율·작업 부담을 비교했습니다."
         return base
     if any(k in text for k in ["emg", "kinematic", "biomechanics", "motion", "force"]):
-        base = "생체역학 측정 연구로 자세, 움직임, 힘 또는 근활성도 지표를 수집해 신체 부담을 정량적으로 평가했습니다."
+        base = "자세, 움직임, 힘, 근육 활성도 같은 신체 지표를 측정해 작업 부담을 수치로 평가했습니다."
         if sample:
-            base = f"생체역학 측정 연구로 {sample}에서 자세·움직임·힘 또는 근활성도 지표를 수집해 신체 부담을 평가했습니다."
+            base = f"{sample}에서 자세·움직임·근육 활성도를 측정해 작업 부담을 수치로 평가했습니다."
         return base
     if any(k in text for k in ["interview", "qualitative", "focus group", "thematic analysis"]):
-        base = "정성연구 설계로 인터뷰나 관찰 자료를 수집하고, 반복적으로 나타나는 경험과 문제 패턴을 주제별로 정리했습니다."
+        base = "인터뷰나 관찰을 통해 데이터를 수집하고, 반복적으로 나타나는 경험과 문제를 주제별로 정리했습니다."
         if sample:
-            base = f"정성연구 설계로 {sample}을 대상으로 인터뷰·관찰 자료를 수집하고, 반복되는 문제 패턴을 주제별로 정리했습니다."
+            base = f"{sample}을 대상으로 인터뷰·관찰을 진행하고, 반복되는 문제 패턴을 주제별로 정리했습니다."
         return base
     if any(k in text for k in ["machine learning", "deep learning", "algorithm", "model", "classifier"]):
-        base = "모델 평가 연구로 알고리즘을 적용해 예측 또는 분류 성능을 비교하고, 정확도 등 핵심 성능 지표를 확인했습니다."
+        base = "AI 알고리즘을 적용해 예측·분류 성능을 비교하고, 정확도 등 핵심 성능 지표를 확인했습니다."
         if sample:
-            base = f"모델 평가 연구로 {sample} 또는 해당 데이터셋을 사용해 알고리즘 성능을 비교하고, 정확도 등 지표를 확인했습니다."
+            base = f"해당 데이터셋({sample})에 AI 알고리즘을 적용해 성능을 비교하고, 정확도 등 지표를 확인했습니다."
         return base
-    return "초록에 제시된 연구 대상, 비교 조건, 측정 지표를 바탕으로 연구 설계의 핵심 흐름을 정리했습니다."
+    return "연구 대상, 비교 조건, 측정 지표를 바탕으로 연구 흐름을 정리했습니다."
 
 
 def fallback_paper_structured(paper: dict) -> dict:
@@ -753,55 +766,55 @@ def fallback_paper_structured(paper: dict) -> dict:
     text = (title + " " + abstract).lower()
 
     topic_map = {
-        "초음파 인간공학": "초음파 검사 과정에서 작업 자세, 조작 방식, 검사 흐름이 사용자 부담에 미치는 영향을 다뤘습니다.",
-        "근골격계질환": "반복 작업 환경에서 통증·부담을 유발하는 요인과 이를 줄이기 위한 조건을 다뤘습니다.",
-        "작업부하·인지부하": "작업 수행 중 인지부하, 정신적 부담, 피로에 영향을 주는 요인을 다뤘습니다.",
-        "작업환경 개선": "작업환경, 인터페이스, 워크플로우 개선이 성능과 부담에 미치는 영향을 다뤘습니다.",
-        "생체역학": "자세, 움직임, 힘, 근활성도 같은 생체역학 지표를 통해 작업 부담을 평가했습니다.",
-        "역학·설문": "작업 관련 증상과 위험요인을 조사해 우선 관리 대상과 연관 요인을 파악했습니다.",
-        "AI·기술": "AI 또는 기술 시스템이 수행 효율과 사용 경험에 미치는 영향을 다뤘습니다.",
+        "초음파 인간공학": "초음파 검사 중 작업 자세, 조작 방식, 검사 흐름이 사용자 부담에 미치는 영향을 다룬 연구입니다.",
+        "근골격계질환": "반복 작업 환경에서 통증·부담을 유발하는 요인과 이를 줄이는 조건을 분석한 연구입니다.",
+        "작업부하·인지부하": "작업 중 인지 부담, 정신적 피로에 영향을 주는 요인을 분석한 연구입니다.",
+        "작업환경 개선": "작업 환경, 인터페이스, 워크플로우 개선이 성능과 부담에 미치는 영향을 다룬 연구입니다.",
+        "생체역학": "자세·움직임·힘·근육 활성도 지표를 통해 작업 부담을 수치로 평가한 연구입니다.",
+        "역학·설문": "작업 관련 증상과 위험요인을 조사해 우선 관리 대상과 관련 요인을 파악한 연구입니다.",
+        "AI·기술": "AI 또는 기술 시스템이 수행 효율과 사용 경험에 미치는 영향을 분석한 연구입니다.",
     }
 
-    result = "초록에 따르면 조건 차이, 위험요인 또는 설계 요소에 따라 작업부하나 수행 차이가 나타났음을 시사합니다."
+    result = "작업 환경이나 설계 방식에 따라 업무 부담과 수행 능력에 차이가 생길 수 있음을 보여줬습니다."
     if any(k in text for k in ["improved", "improvement", "reduced", "lower", "decrease"]):
-        result = "초록에 따르면 개입 또는 설계 차이에 따라 작업부하, 수행 효율 또는 사용성이 개선됐습니다."
+        result = "개입 또는 설계 변경을 통해 작업 부담, 수행 효율 또는 사용성이 개선됐습니다."
     if any(k in text for k in ["no difference", "noninferiority", "non-inferiority"]):
-        result = "초록에 따르면 비교 조건 간 핵심 성능 차이가 크지 않거나, 대체 가능성을 시사하는 결과가 확인됐습니다."
+        result = "두 조건 간 핵심 성능 차이가 크지 않아 대체 가능성을 시사하는 결과가 나왔습니다."
     if any(k in text for k in ["risk", "hazard", "fatigue", "pain", "burden"]):
-        result = "초록에 따르면 피로, 통증, 부담 또는 위험 노출과 관련된 핵심 요인이 결과로 제시됐습니다."
+        result = "피로, 통증, 부담과 관련된 핵심 위험 요인이 확인됐습니다."
 
     ux = []
     if topic == "초음파 인간공학":
         ux += [
-            "검사 중 반복 입력을 줄이도록 측정·주석·저장 흐름을 단축하고, 자주 쓰는 기능을 화면 상단 또는 물리 키에 우선 배치할 필요가 있습니다.",
-            "프로브를 쥔 상태에서 한 손으로 조작 가능한 UI를 우선 설계해 손목 회전과 시선 이동을 줄이는 방향으로 개선할 수 있습니다.",
+            "측정·주석·저장 동작을 줄여 검사 중 반복 입력을 최소화하고, 자주 쓰는 기능은 화면 상단이나 물리 키에 배치하세요.",
+            "프로브를 잡은 상태에서 한 손으로 조작 가능한 UI를 설계해 손목 회전과 시선 이동을 줄이세요.",
         ]
     elif topic in ["근골격계질환", "생체역학"]:
         ux += [
-            "상지 부담을 키우는 작은 클릭 타깃, 깊은 메뉴 구조, 잦은 모드 전환을 줄이는 것이 중요합니다.",
-            "검사 시간이 아니라 자세 변화 횟수와 반복 조작 수까지 UX 성과지표에 포함해 개선 우선순위를 정할 수 있습니다.",
+            "작은 터치 타겟, 깊은 메뉴 구조, 잦은 모드 전환을 줄여 상지 부담을 낮추세요.",
+            "검사 시간뿐 아니라 자세 변화 횟수와 반복 조작 수를 UX 성과지표로 추가해 개선 우선순위를 정하세요.",
         ]
     elif topic in ["작업부하·인지부하", "작업환경 개선"]:
         ux += [
-            "핵심 정보의 우선순위를 다시 정해 시선 이동과 인지 전환 비용을 줄이는 화면 구성이 필요합니다.",
-            "알림과 확인 단계의 밀도를 줄여 검사 흐름을 끊지 않도록 워크플로우를 정리할 수 있습니다.",
+            "핵심 정보 우선순위를 재정리해 시선 이동과 인지 전환 비용을 줄이는 화면 구성을 고려하세요.",
+            "불필요한 알림과 확인 단계를 줄여 검사 흐름이 끊기지 않도록 워크플로우를 정리하세요.",
         ]
     elif topic == "AI·기술":
         ux += [
-            "AI 결과는 자동 제시만이 아니라 근거, 신뢰도, 수정 경로를 함께 보여 사용자의 판단권을 유지하도록 설계해야 합니다.",
-            "자동화 기능 도입 시 기존 검사 흐름을 크게 바꾸지 않는 점진적 인터랙션이 현장 수용성을 높일 수 있습니다.",
+            "AI 결과를 자동 제시할 때 근거, 신뢰도, 수정 경로를 함께 보여줘 사용자가 최종 판단을 내릴 수 있게 하세요.",
+            "자동화 기능은 기존 검사 흐름을 크게 바꾸지 않는 방향으로 점진적으로 도입하세요.",
         ]
     else:
         ux += [
-            "연구에서 제시한 부담 요인과 성능 차이를 실제 초음파 검사 워크플로우의 병목 단계와 연결해 개선 우선순위를 정할 수 있습니다.",
-            "시간 절감뿐 아니라 인지부하와 물리적 부담 감소를 함께 UX 성과지표로 관리할 수 있습니다.",
+            "연구에서 확인된 부담 요인을 실제 초음파 검사 워크플로우의 병목 지점과 연결해 개선 우선순위를 정하세요.",
+            "시간 절감뿐 아니라 인지 부담과 신체 부담 감소를 함께 UX 성과지표로 관리하세요.",
         ]
 
     return {
         "ko_abstract": ensure_sentence(translate_ko(abstract[:1800]), korean_preferred=True),
         "research_method": ensure_sentence(infer_method_detail(title, abstract), korean_preferred=True),
         "key_result": ensure_sentence(result, korean_preferred=True),
-        "research_topic": ensure_sentence(topic_map.get(topic, "논문 초록을 바탕으로 작업부하, 사용성, 수행 성능과 관련된 연구 주제를 다뤘습니다."), korean_preferred=True),
+        "research_topic": ensure_sentence(topic_map.get(topic, "작업 부담, 사용성, 수행 성능과 관련된 연구입니다."), korean_preferred=True),
         "ux_insights": [ensure_sentence(x, korean_preferred=True) for x in ux[:3]],
     }
 
@@ -823,21 +836,24 @@ def enrich_papers(papers: list) -> list:
 
     parsed = {}
     if GEMINI_API_KEY:
+        # ── 개선된 논문 분석 프롬프트 ────────────────────────
         prompt = f"""
-당신은 인간공학 분야 학술 편집자이자 의료기기 UX 전략가입니다.
-아래 논문 목록을 읽고 각 논문에 대해 반드시 JSON 배열만 출력하세요.
+당신은 인간공학 전문가이자 삼성메디슨 UX 디자이너의 업무 보조입니다.
+아래 논문들을 읽고 반드시 JSON 배열만 출력하세요.
+
 각 객체 필드:
 - id
-- ko_title: 자연스러운 한국어 제목
-- ko_abstract: 초록의 자연스러운 한국어 번역
-- research_method: 주요 연구 방법. 1~3문장. 연구 대상, 실험/조사/문헌고찰 설계, 측정 지표 또는 비교 조건이 드러나야 함.
-- key_result: 핵심 연구 결과 1~2문장. 초록 근거만 사용.
-- ux_insights: 삼성메디슨 UX 업무 적용 인사이트 2~3개 배열. 구체적으로 작성.
+- ko_title: 한국어 제목. 학술 번역체 금지. 신문 제목처럼 간결하고 명확하게.
+- ko_abstract: 초록 한국어 번역. 직역 금지. 핵심만 골라서 한국 독자가 바로 이해할 수 있도록 의역. 전문용어는 괄호로 원어 병기. 3~5문장 이내.
+- research_method: "누가, 어떻게, 무엇을 측정했는가"를 2문장으로. 처음 듣는 사람도 이해할 수 있도록. 예: "초음파 검사사 42명을 대상으로 두 가지 탐촉자 방식을 비교했습니다. 어깨·손목 근육 활성도(EMG)와 주관적 불편감을 함께 측정했습니다."
+- key_result: 이 연구에서 가장 중요한 발견 1~2문장. 숫자가 있으면 포함. 초록 근거만 사용.
+- ux_insights: 삼성메디슨 UX 디자이너가 Figma UI/WF 설계에 바로 적용할 수 있는 구체적인 인사이트 2~3개. "~할 수 있습니다" 보다 "~하세요" 또는 "~를 고려하세요"처럼 행동 지향적으로 작성.
 
-규칙:
-- research_method는 처음 보는 사람도 이것만 읽으면 어떤 연구가 어떻게 진행됐는지 이해할 수 있어야 함
-- 한국어는 완결 문장으로 쓰고 문장 끝을 마침표로 끝낼 것
-- 영어 문장을 그대로 남기지 말 것
+한국어 문체 규칙:
+- 직역체 금지: "~임을 시사합니다", "~에 따르면", "~하는 것으로 나타났습니다" 최소화
+- 동료에게 설명하듯 자연스럽고 간결하게
+- 문장 끝은 "~습니다"로 통일
+- 영어 단어를 그대로 쓰지 말 것 (단, 고유명사·제품명 제외)
 - 과장 금지, 초록에 없는 내용 추가 금지
 
 입력 데이터:
@@ -911,6 +927,60 @@ def group_news_by_company(items: list) -> dict:
     return grouped
 
 
+# ── 담당 기능 연관 섹션 ───────────────────────────────────────
+def build_feature_highlight_html(items: list) -> str:
+    related = []
+    for item in items:
+        feature = classify_feature(
+            item.get("title", "") + " " + item.get("snippet", "")
+        )
+        if feature:
+            related.append({**item, "feature": feature})
+    if not related:
+        return ""
+    rows = ""
+    for item in related[:10]:
+        rows += f"""
+        <tr>
+          <td style="padding:8px 10px;border-bottom:1px solid #fef3c7;font-size:12px;
+                     color:#555;width:20%;vertical-align:top;">{safe_html(item.get("company", ""))}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #fef3c7;font-size:12px;vertical-align:top;">
+            <a href="{safe_html(item.get("url", ""))}" style="color:#1a5276;text-decoration:none;">
+              {safe_html(item.get("title", "")[:70])}
+            </a>
+            <div style="font-size:11px;color:#888;margin-top:3px;">
+              {safe_html(item.get("one_line_ko", "")[:80])}
+            </div>
+          </td>
+          <td style="padding:8px 10px;border-bottom:1px solid #fef3c7;width:22%;vertical-align:top;">
+            <span style="background:#fef3c7;color:#b45309;padding:3px 8px;
+                         border-radius:10px;font-size:11px;font-weight:bold;">
+              {safe_html(item.get("feature", ""))}
+            </span>
+          </td>
+        </tr>"""
+    return f"""
+    <div style="margin:0 0 20px;padding:16px 20px;background:#fffbea;
+                border:1px solid #f4d08b;border-radius:8px;">
+      <h3 style="margin:0 0 8px;font-size:14px;color:#b45309;font-weight:bold;">
+        ⭐ 담당 기능 연관 경쟁사 소식 ({len(related)}건)
+      </h3>
+      <p style="margin:0 0 12px;font-size:11px;color:#9a6700;">
+        VTIAssist·IVCAssist·LiveEF·LungAssist 등 담당 기능 키워드와 연관된 항목을 자동 분류했습니다.
+      </p>
+      <table style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr style="background:#fef3c7;">
+            <th style="padding:8px 10px;text-align:left;font-size:11px;color:#b45309;">경쟁사</th>
+            <th style="padding:8px 10px;text-align:left;font-size:11px;color:#b45309;">소식</th>
+            <th style="padding:8px 10px;text-align:left;font-size:11px;color:#b45309;">연관 기능</th>
+          </tr>
+        </thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>"""
+
+
 def build_news_html(items: list) -> str:
     if not items:
         return "<p>지난 24시간 내 조건에 맞는 신뢰 출처 뉴스가 없습니다.</p>"
@@ -930,7 +1000,7 @@ def build_news_html(items: list) -> str:
   <h4 style="margin:4px 0;font-size:14px;"><a href="{safe_html(item.get("url", ""))}" style="color:#1a5276;text-decoration:none;">{safe_html(item.get("title", ""))}</a></h4>
   <p style="font-size:11px;color:#777;margin:2px 0;">{safe_html(item.get("date", "")[:16])} · {safe_html(item.get("source", ""))}</p>
   <p style="font-size:13px;color:#333;line-height:1.6;"><strong>One-line summary:</strong> {safe_html(item.get("one_line_en", ""))}</p>
-  <p style="font-size:13px;color:#444;background:#eef6fb;padding:8px;border-radius:4px;line-height:1.6;"><strong>한글 요약:</strong> {safe_html(item.get("one_line_ko", ""))}</p>
+  <p style="font-size:13px;color:#444;background:#eef6fb;padding:8px;border-radius:4px;line-height:1.6;"><strong>한줄 요약:</strong> {safe_html(item.get("one_line_ko", ""))}</p>
 </div>'''
             )
     return "\n".join(html_blocks)
@@ -964,19 +1034,19 @@ def build_papers_html(papers: list) -> str:
   </p>
   <p style="font-size:13px;color:#333;line-height:1.7;"><strong>Abstract:</strong> {safe_html(abstract_en)}</p>
   <div style="background:#fdf7ea;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;">
-    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#9a6700;">(1) 초록의 한국어 번역</p>
+    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#9a6700;">(1) 초록 요약 (한국어)</p>
     <p style="margin:0;font-size:13px;color:#5b4a1f;">{safe_html(abstract_ko)}</p>
   </div>
   <div style="background:#eef6fb;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;">
-    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1a5276;">(2) 주요 연구 방법</p>
+    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1a5276;">(2) 연구 방법</p>
     <p style="margin:0;font-size:13px;color:#34495e;">{safe_html(p.get("research_method", ""))}</p>
   </div>
   <div style="background:#eaf7ee;padding:10px;border-radius:4px;line-height:1.8;margin-top:8px;">
-    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1f6f43;">(3) 핵심 연구 결과</p>
+    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#1f6f43;">(3) 핵심 결과</p>
     <p style="margin:0;font-size:13px;color:#2f4f3e;">{safe_html(p.get("key_result", ""))}</p>
   </div>
   <div style="background:#fff7e8;border:1px solid #f4d08b;padding:10px 12px;border-radius:4px;margin-top:10px;">
-    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#9a6700;">(4) 삼성메디슨 UX 업무에 적용 가능한 인사이트</p>
+    <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#9a6700;">(4) 삼성메디슨 UX 적용 포인트</p>
     <ul style="margin:0;padding-left:18px;font-size:13px;color:#5b4a1f;line-height:1.8;">{ux_html}</ul>
   </div>
 </div>'''
@@ -984,7 +1054,7 @@ def build_papers_html(papers: list) -> str:
     return "\n".join(blocks)
 
 
-def assemble_email(news_html: str, papers_html: str, n_news: int, n_papers: int) -> str:
+def assemble_email(news_html: str, papers_html: str, n_news: int, n_papers: int, feature_html: str = "") -> str:
     today = dt.date.today().strftime("%Y년 %m월 %d일")
     return f'''<!DOCTYPE html>
 <html lang="ko">
@@ -1018,7 +1088,8 @@ def assemble_email(news_html: str, papers_html: str, n_news: int, n_papers: int)
   <tr>
     <td style="padding:20px 30px 8px;">
       <h2 style="margin:0 0 12px;color:#1a5276;border-bottom:2px solid #2e86c1;padding-bottom:8px;">초음파 회사 동향</h2>
-      <p style="margin:0 0 10px;font-size:12px;color:#6b7280;">지난 24시간 내 신뢰 가능한 출처에서 확인된 주요 초음파 시장 동향을 회사별로 정리했습니다. 각 기사에는 영문 1줄 요약과 한국어 1줄 요약을 함께 제공합니다.</p>
+      <p style="margin:0 0 10px;font-size:12px;color:#6b7280;">지난 24시간 내 신뢰 가능한 출처에서 확인된 주요 초음파 시장 동향을 회사별로 정리했습니다.</p>
+      {feature_html}
       {news_html}
     </td>
   </tr>
@@ -1026,14 +1097,14 @@ def assemble_email(news_html: str, papers_html: str, n_news: int, n_papers: int)
   <tr>
     <td style="padding:20px 30px 24px;">
       <h2 style="margin:0 0 12px;color:#1a5276;border-bottom:2px solid #27ae60;padding-bottom:8px;">인간공학 논문 동향</h2>
-      <p style="margin:0 0 10px;font-size:12px;color:#6b7280;">논문 초록의 한국어 번역, 연구 설계가 드러나는 주요 연구 방법, 핵심 결과, 삼성메디슨 UX 적용 인사이트를 함께 제공합니다.</p>
+      <p style="margin:0 0 10px;font-size:12px;color:#6b7280;">논문 초록 요약, 연구 방법, 핵심 결과, 삼성메디슨 UX 적용 포인트를 함께 제공합니다.</p>
       {papers_html}
     </td>
   </tr>
   <tr>
     <td style="background:#2c3e50;padding:18px 30px;color:#bdc3c7;font-size:11px;line-height:1.7;">
-      <p style="margin:0;">뉴스는 Google News RSS의 신뢰 출처, 전문매체 RSS, FDA 공개 데이터를 기준으로 수집했습니다. 논문은 PubMed, arXiv, Semantic Scholar를 사용했습니다.</p>
-      <p style="margin:4px 0 0;">요약 문장은 자동 생성 보조를 사용했으므로, 중요한 의사결정에는 원문 링크 확인이 필요합니다.</p>
+      <p style="margin:0;">뉴스는 Google News RSS, 전문매체 RSS, FDA 공개 데이터를 기준으로 수집했습니다. 논문은 PubMed, arXiv, Semantic Scholar를 사용했습니다.</p>
+      <p style="margin:4px 0 0;">요약은 자동 생성 보조를 활용했으므로 중요한 의사결정에는 원문 확인이 필요합니다.</p>
     </td>
   </tr>
 </table>
@@ -1078,7 +1149,8 @@ def main():
 
     news_html = build_news_html(all_news)
     papers_html = build_papers_html(all_papers)
-    html_body = assemble_email(news_html, papers_html, len(all_news), len(all_papers))
+    feature_html = build_feature_highlight_html(all_news)
+    html_body = assemble_email(news_html, papers_html, len(all_news), len(all_papers), feature_html)
     subject = f"초음파 & 인간공학 다이제스트 | {today} | 뉴스 {len(all_news)}건, 논문 {len(all_papers)}편"
     send_email(subject, html_body)
 
