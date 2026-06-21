@@ -1,0 +1,24 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: '0 0 1 * *'  # 매월 1일 자정에 실행
+  workflow_dispatch:      # 수동 실행도 가능
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Keep repository active
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "Last keep-alive: $(date)" > .github/keep-alive.txt
+          git add .github/keep-alive.txt
+          git commit -m "chore: keep repository active [skip ci]"
+          git push
